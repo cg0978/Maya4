@@ -230,7 +230,7 @@ class SARZarrDataset(Dataset):
         save_samples (bool, optional): If True, saves computed patch indices to disk. Defaults to True.
         buffer (Tuple[int, int], optional): Buffer (margin) to avoid sampling near image edges. Defaults to (100, 100).
         stride (Tuple[int, int], optional): Stride for patch extraction. Defaults to (50, 50).
-        max_base_sample_size (Tuple[int, int], optional): Maximum base sample size. Defaults to (-1, -1).
+        max_base_sample_size (Tuple[int, int]): Maximum base sample size. Defaults to (-1, -1).
         backend (str, optional): Backend for loading Zarr data, either "zarr" or "dask". Defaults to "zarr".
         verbose (bool, optional): If True, prints verbose output. Defaults to True.
         cache_size (int, optional): Maximum number of chunks to cache in memory.
@@ -927,7 +927,7 @@ class SARZarrDataset(Dataset):
         except IndexError:
             raise RuntimeError(f"No store entry found for {zfile} in dataset files.")
     def get_max_base_sample_size(self, zfile: Union[str, os.PathLike]):
-        ph, pw =   self._max_base_sample_size
+        ph, pw = self._max_base_sample_size
         if ph == -1:
             ph = self.get_store_at_level(Path(zfile), self.level_from).shape[0]
         if pw == -1:
