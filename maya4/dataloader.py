@@ -2126,7 +2126,6 @@ def get_sar_dataloader(
 
     Args:
         data_dir (str): Path to the directory containing SAR data.
-        file_pattern (str, optional): Glob pattern for Zarr files. Defaults to "*.zarr".
         batch_size (int, optional): Number of samples per batch. Defaults to 8.
         num_workers (int, optional): Number of subprocesses for data loading. Defaults to 2.
         return_whole_image (bool, optional): If True, returns the whole image. Defaults to False.
