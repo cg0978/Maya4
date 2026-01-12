@@ -27,6 +27,8 @@
 
 Maya4 is a production-ready Python package and dataset organization dedicated to curating and providing **multi-level intermediate SAR representations** from Sentinel-1 acquisitions, spanning the entire processing chain from Level 0 (raw) to Level 1 (focused imagery).
 
+Try it directly in Colab: [Maya4 Demo Notebook](https://colab.research.google.com/drive/1TqG0ldv87-dDlUJyL0qMdlRnu5AzjJj9?usp=sharing).
+
 ### The Māyā Philosophy
 
 The name **Maya4** draws inspiration from the *Māyā veil* in philosophy, where reality is hidden behind successive layers—just as radar echoes undergo multiple transformations before forming a final SAR image. Each processing level reveals a different aspect of the electromagnetic interaction with Earth's surface.
