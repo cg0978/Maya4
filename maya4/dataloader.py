@@ -461,8 +461,9 @@ class SARZarrDataset(Dataset):
             print(f"Total files found in remote repository: {len(records)}")
             df = pd.DataFrame(records)
         else:
-            print(f"Files in local directory {self.data_dir}: {[f.name for f in sorted(self.data_dir.glob('*'))]}")
-            records = [r for r in (parse_product_filename(f) for f in sorted(self.data_dir.glob("*"))) if r is not None]
+            found_files = sorted(self.data_dir.rglob("*.zarr"))
+            print(f"Found {len(found_files)} .zarr files in {self.data_dir}")
+            records = [r for r in (parse_product_filename(f) for f in found_files) if r is not None]
             df = pd.DataFrame(records)
         # Drop records without acquisition_date and ensure datetime type
         self._files = self.filters._filter_products(df)
