@@ -733,11 +733,10 @@ class SARZarrDataset(Dataset):
             try:
                 store = zarr.open(zfile, mode='r')
                 
-                # Validate that the store has actual data, not just metadata
-                # Check if it's a group with levels or an array
-                if isinstance(store, zarr.hierarchy.Group):
-                    # For a group, check if it has members
-                    if len(store.keys()) == 0:
+                # Check "is this a valid container?"
+                if isinstance(store, zarr.Group):
+                    # Check if it's empty
+                    if len(store) == 0:
                         raise RuntimeError(
                             f"Zarr store {zfile} is incomplete: metadata exists but no data arrays found. "
                             f"Only metadata has been downloaded. Data chunks will be downloaded on-demand."
