@@ -2108,7 +2108,8 @@ def get_sar_dataloader(
     geographic_clustering: bool = False,  # Enable geographic clustering
     n_clusters: int = 10,  # Number of geographic clusters, 
     use_balanced_sampling: bool = True, 
-    split: str = "train"
+    split: str = "train",
+    zarr_version: Optional[Union[int, List[int]]] = None
 ) -> SARDataloader:
     """
     Create and return a PyTorch DataLoader for SAR data using SARZarrDataset and KPatchSampler.
@@ -2140,10 +2141,19 @@ def get_sar_dataloader(
         geographic_clustering (bool, optional): If True, clusters data by geographic location. Defaults to False.
         n_clusters (int, optional): Number of geographic clusters when clustering is enabled. Defaults to 10.
         split (str, optional): Dataset split to use (e.g., "train", "val", "test"). Defaults to "train".
+        zarr_version (Optional[Union[int, List[int]]], optional): Zarr version(s) to filter by. Defaults to None.
 
     Returns:
         SARDataloader: PyTorch DataLoader for the SAR dataset.
     """
+    if zarr_version is not None:
+        if filters is None:
+            filters = SampleFilter()
+        if isinstance(zarr_version, int):
+            filters.zarr_versions = [zarr_version]
+        elif isinstance(zarr_version, list):
+            filters.zarr_versions = zarr_version
+
     dataset = SARZarrDataset(
         data_dir=data_dir,
         filters=filters,
