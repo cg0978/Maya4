@@ -358,7 +358,9 @@ class SARZarrDataset(Dataset):
         Returns:
             Tuple[int, int]: Patch size (height, width) for the specified processing level.
         """
-        
+        if self.return_whole_image and zfile is not None:
+            return self.get_whole_sample_shape(zfile)
+
         ph, pw = self._patch_size
 
         if ph > 0 and pw > 0 or zfile is None:
