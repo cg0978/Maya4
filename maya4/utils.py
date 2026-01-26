@@ -695,7 +695,11 @@ def _get_balanced_representation_samples(
             print(f"  Filling from scene types with extra samples...")
         
         # Get already selected polygons for overlap checking
-        already_selected = pd.concat([s for s in selected_samples.values() if len(s) > 0], ignore_index=True)
+        valid_samples = [s for s in selected_samples.values() if len(s) > 0]
+        if valid_samples:
+            already_selected = pd.concat(valid_samples, ignore_index=True)
+        else:
+            already_selected = pd.DataFrame(columns=df.columns)
         
         # Try to fill from scene types that have extra samples
         # First pass: ROUND-ROBIN strict overlap avoidance
