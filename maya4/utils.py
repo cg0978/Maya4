@@ -113,18 +113,9 @@ class SampleFilter:
         if len(self.parts) > 0:
             mask &= df["part"].isin(self.parts)
         
-        if len(self.zarr_versions) > 0:
-            def check_version(path):
-                try:
-                    return get_zarr_version(path) in self.zarr_versions
-                except ValueError:
-                    return False
-            
-            # Apply version check only on currently selected items to minimize I/O
-            current_candidates = df[mask]
-            if not current_candidates.empty:
-                version_mask = current_candidates['full_name'].apply(check_version)
-                mask &= version_mask.reindex(mask.index, fill_value=False)
+        # Zarr version filtering is handled in SARZarrDataset._build_file_list
+        # because it might require downloading metadata in online mode
+        
         return df[mask]
 
 

@@ -459,6 +459,67 @@ class SARZarrDataset(Dataset):
             df = pd.DataFrame(records)
         # Drop records without acquisition_date and ensure datetime type
         self._files = self.filters._filter_products(df)
+        
+        # New logic for Zarr version filtering
+        if hasattr(self.filters, 'zarr_versions') and self.filters.zarr_versions:
+             if self.verbose:
+                 print(f"Filtering files by Zarr version(s): {self.filters.zarr_versions}")
+                 
+             indices_to_keep = []
+             files_checked = 0
+             
+             for idx, row in self._files.iterrows():
+                 zfile = Path(row['full_name'])
+                 version = None
+                 files_checked += 1
+                 
+                 # Check if local
+                 if zfile.exists():
+                     try:
+                        version = get_zarr_version(zfile)
+                     except ValueError:
+                        pass
+                 elif self.online:
+                     # Download metadata to check version
+                     zfile_name = zfile.name
+                     part = str(row['part'])
+                     repo_id = f"{self.author}/{part}"
+                     local_part_dir = self.data_dir / part
+                     local_part_dir.mkdir(parents=True, exist_ok=True)
+                     
+                     if self.verbose:
+                         print(f"Downloading metadata to check version for {zfile_name}...")
+                     
+                     try:
+                         # Use download_metadata_from_product to fetch just the root metadata
+                         # Empty levels list will just fetch root files if implemented that way, 
+                         # or we can pass a dummy level if needed. 
+                         # Based on usage elsewhere, it fetches root metadata + specified levels.
+                         download_metadata_from_product(
+                             zfile_name=str(zfile_name),
+                             local_dir=str(local_part_dir),
+                             levels=[], 
+                             repo_id=repo_id,
+                             show_progress=False
+                         )
+                         
+                         if zfile.exists():
+                             try:
+                                 version = get_zarr_version(zfile)
+                             except ValueError:
+                                 pass
+                     except Exception as e:
+                         if self.verbose:
+                             print(f"Failed to check version for {zfile_name}: {e}")
+                 
+                 if version is not None and version in self.filters.zarr_versions:
+                     indices_to_keep.append(idx)
+             
+             if self.verbose:
+                 print(f"Version filtering: Kept {len(indices_to_keep)} of {files_checked} candidate files.")
+                 
+             self._files = self._files.loc[indices_to_keep].copy()
+
         self._files.sort_values(by=['full_name'], inplace=True)
         # Apply balanced sampling if enabled
         if self.use_balanced_sampling:
