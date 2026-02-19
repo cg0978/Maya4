@@ -1279,10 +1279,31 @@ class SARZarrDataset(Dataset):
         chunk_name = get_chunk_name_from_coords(y, x, zarr_file_name=zfile_name, level=level, chunks=chunks, version=get_zarr_version(zfile))
         chunk_path = self.data_dir / part / chunk_name
         
-        if not chunk_path.exists():
+        needs_download = (not chunk_path.exists())
+        if not needs_download:
+            try:
+                needs_download = chunk_path.stat().st_size == 0
+            except OSError:
+                needs_download = True
+
+        if needs_download:
             if self.verbose:
-                print(f"Chunk {chunk_name} not found locally. Downloading from Hugging Face Zarr archive...")
-            fetch_chunk_from_hf_zarr(level=level, y=y, x=x, zarr_archive=zfile_name, local_dir=os.path.join(self.data_dir, part), repo_id=repo_id)
+                print(f"Chunk {chunk_name} missing/empty. Downloading from Hugging Face Zarr archive...")
+            fetch_chunk_from_hf_zarr(
+                level=level,
+                y=y,
+                x=x,
+                zarr_archive=zfile_name,
+                local_dir=os.path.join(self.data_dir, part),
+                repo_id=repo_id,
+            )
+
+        # Fail fast if the chunk is still not readable on disk.
+        if (not chunk_path.exists()) or chunk_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"Chunk download failed or produced empty file for {Path(zfile).name}:{level} "
+                f"(y={y}, x={x}, chunk={chunk_name})."
+            )
         return chunk_path
 
 
@@ -1309,12 +1330,34 @@ class SARZarrDataset(Dataset):
         chunk_y_end = min(chunk_y_start + ch, arr.shape[0])
         chunk_x_end = min(chunk_x_start + cw, arr.shape[1])
         
+        chunk_path = None
         # Ensure the chunk is downloaded if not already available
         if self.online:
-            self._download_sample_if_missing(zfile, level, chunk_y_start, chunk_x_start)
+            chunk_path = self._download_sample_if_missing(zfile, level, chunk_y_start, chunk_x_start)
         
         # Load the actual chunk data
-        chunk_data = arr[chunk_y_start:chunk_y_end, chunk_x_start:chunk_x_end]
+        try:
+            chunk_data = arr[chunk_y_start:chunk_y_end, chunk_x_start:chunk_x_end]
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            # Some remote chunks can be partially/corruptly downloaded; force a single redownload.
+            if self.online and "blosc decompression" in msg:
+                if chunk_path is None:
+                    chunk_path = self._download_sample_if_missing(zfile, level, chunk_y_start, chunk_x_start)
+                try:
+                    if chunk_path.exists():
+                        chunk_path.unlink()
+                except OSError:
+                    pass
+                if self.verbose:
+                    print(
+                        f"[warn] Corrupted chunk detected for {Path(zfile).name}:{level} "
+                        f"cy={cy} cx={cx}. Re-downloading once."
+                    )
+                self._download_sample_if_missing(zfile, level, chunk_y_start, chunk_x_start)
+                chunk_data = arr[chunk_y_start:chunk_y_end, chunk_x_start:chunk_x_end]
+            else:
+                raise
         
         return chunk_data.astype(np.complex128)
     
