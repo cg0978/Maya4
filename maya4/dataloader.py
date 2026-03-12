@@ -1132,9 +1132,15 @@ class SARZarrDataset(Dataset):
     
     def __len__(self):
         """
-        Return the total number of patches in the dataset (samples_per_prod * max_products).
+        Return the total number of patches in the dataset.
+
+        When ``samples_per_prod > 0`` this is exact: each loaded file
+        contributes exactly ``samples_per_prod`` patches.  When
+        ``samples_per_prod == 0`` the true count is unknown until the
+        sampler scans each file; ``0`` is returned as a sentinel.
         """
-        return self._samples_per_prod * self._max_products
+        n_files = len(self.get_files())
+        return self._samples_per_prod * n_files
 
     def _get_base_sample(self, zfile: os.PathLike, y: int, x: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -2106,17 +2112,19 @@ class KPatchSampler(Sampler):
 
     def __len__(self):
         """Return the total number of samples to be drawn by the sampler."""
+        if self.samples_per_prod > 0:
+            # Each file contributes exactly samples_per_prod patches. It's accurate even before the first iteration (no scan needed).
+            return self.samples_per_prod * len(self.dataset.get_files())
         if self.beginning:
+            # samples_per_prod=0 means "all patches" — unknown until first scan.
             return len(self.dataset)
-        else:
-            total = 0
-            for zfile in self.dataset.get_files():
-                lazy_coords = self.dataset.get_samples_by_file(zfile)
-                if self.samples_per_prod > 0:
-                    total += min(self.samples_per_prod, len(lazy_coords))
-                else:
-                    total += len(lazy_coords)
-            return total
+        # Post-scan: sum actual patch counts per file.
+        total = 0
+        for zfile in self.dataset.get_files():
+            lazy_coords = self.dataset.get_samples_by_file(zfile)
+            if lazy_coords is not None:
+                total += len(lazy_coords)
+        return total
 
 class SARDataloader(DataLoader):
     dataset: SARZarrDataset
