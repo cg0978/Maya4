@@ -40,7 +40,7 @@ try:
     from geopy.geocoders import Nominatim
     from geopy.extra.rate_limiter import RateLimiter
     HAS_GEOPY = True
-    print("✓ Geopy available for land/sea classification")
+    # print("✓ Geopy available for land/sea classification")
 except ImportError:
     HAS_GEOPY = False
     print("! Geopy not available, using coordinate-based classification")
@@ -48,7 +48,7 @@ except ImportError:
 try:
     import folium
     HAS_FOLIUM = True
-    print("✓ Folium available for map visualization")
+    # print("✓ Folium available for map visualization")
 except ImportError:
     HAS_FOLIUM = False
     print("! Folium not available")
