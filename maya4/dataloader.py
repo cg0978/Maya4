@@ -384,7 +384,6 @@ class SARZarrDataset(Dataset):
             pandas DataFrame containing metadata if available, None otherwise
         """
         arr = self.get_store(Path(zfile))
-        print(f"Available zarr attributes: {list(arr.attrs.keys())}")
         if 'metadata' in arr.attrs:
             import pandas as pd
             #print(arr.attrs['metadata'].keys())
