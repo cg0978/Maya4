@@ -712,10 +712,11 @@ class SARZarrDataset(Dataset):
                     if self.verbose:
                         print(f"Successfully opened Zarr store for {zfile}")
                 except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to open Zarr archive {zfile}. "
-                        f"Error: {e}. The file may be corrupted or incomplete."
+                    print(
+                        f"[WARN] Skipping '{os.path.basename(zfile)}': "
+                        f"could not open store offline (metadata-only download?). {e}"
                     )
+                    self._files = self._files.drop(idx)
         elif self.backend == "dask":
             idx = self._files.index[self._files['full_name'] == Path(zfile)]
             if len(idx) > 0:
@@ -725,10 +726,12 @@ class SARZarrDataset(Dataset):
                     try:
                         self._files.at[idx[0], 'store'][level] = self.open_archive(complete_path)
                     except Exception as e:
-                        raise RuntimeError(
-                            f"Failed to open Dask array for {complete_path}. "
-                            f"Error: {e}. The file may be corrupted or incomplete."
+                        print(
+                            f"[WARN] Skipping '{os.path.basename(zfile)}' (level '{level}'): "
+                            f"could not open store offline (metadata-only download?). {e}"
                         )
+                        self._files = self._files.drop(idx)
+                        break  # no point opening remaining levels for a dropped file
         else:
             raise ValueError(f"Unknown backend {self.backend}")
 
