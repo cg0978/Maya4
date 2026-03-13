@@ -26,7 +26,7 @@ from maya4.api import list_base_files_in_repo, list_repos_by_author
 from maya4.utils import minmax_normalize, minmax_inverse, extract_stripmap_mode_from_filename, RC_MAX, RC_MIN, GT_MAX, GT_MIN
 from maya4.api import fetch_chunk_from_hf_zarr, download_metadata_from_product
 import matplotlib.pyplot as plt
-from maya4.normalization import BaseTransformModule, SARTransform
+from maya4.normalization import BaseTransformModule, NormalizationModule, SARTransform
 from matplotlib.figure import Figure
 
 class LazyCoordinateRange:
@@ -345,6 +345,23 @@ class SARZarrDataset(Dataset):
         self._x_coords: Dict[os.PathLike, np.ndarray] = {}
         # self._pos_encoding_out: Dict[str, np.ndarray] = {}
         # self.init_samples()
+        # Guard against the dangerous combination: complex_valued=True + NormalizationModule.
+        # When the transform is applied to a complex numpy array, a scalar subtraction only
+        # shifts the real part; the imaginary channel ends up with a constant DC offset after
+        # inverse normalization.  ComplexNormalizationModule normalises both parts correctly.
+        if self.complex_valued and self.transform is not None:
+            t_check = getattr(self.transform, 'transform_rcmc', None) or getattr(self.transform, 'transform_from', None)
+            if isinstance(t_check, NormalizationModule):
+                import warnings
+                warnings.warn(
+                    "SARZarrDataset: complex_valued=True with NormalizationModule will produce "
+                    "incorrect normalization — scalar subtraction on a complex array only shifts "
+                    "the real part, leaving the imaginary channel with a constant DC offset after "
+                    "minmax_inverse.  Use ComplexNormalizationModule(real_min, real_max, "
+                    "imag_min, imag_max) for complex_valued=True.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         self._initialize_stores()
         if self.verbose:
             print(f"Initialized dataloader with config: buffer={buffer}, stride={stride}, patch_size={patch_size}, complex_values={complex_valued}")
@@ -1254,6 +1271,20 @@ class SARZarrDataset(Dataset):
             print(f"Base sample loading for {zfile} at ({y}, {x}) took {dt:.4f} seconds")
             
             
+        #print(f"Patch shape before stacking: {patch_from.shape}, {patch_to.shape}")
+        if not self.complex_valued:
+            # Split complex → (H, W, 2) float32 BEFORE applying the transform.
+            # Real-valued normalizers (e.g. NormalizationModule) apply a scalar
+            # subtraction to the array; on a complex dtype numpy only shifts the
+            # real part, leaving the imaginary channel with a constant DC offset
+            # after inverse normalization.  Splitting first ensures both channels
+            # are real and are normalized independently and correctly.
+            t0 = time.time()
+            patch_from = np.stack((np.real(patch_from), np.imag(patch_from)), axis=-1).astype(np.float32)
+            patch_to = np.stack((np.real(patch_to), np.imag(patch_to)), axis=-1).astype(np.float32)
+            if self.verbose:
+                dt = time.time() - t0
+                print(f"Complex to real conversion took {dt:.4f} seconds")
         if self.transform:
             t0 = time.time()
             patch_from = self.transform(patch_from, self.level_from)
@@ -1261,14 +1292,6 @@ class SARZarrDataset(Dataset):
             if self.verbose:
                 dt = time.time() - t0
                 print(f"Patch transformation took {dt:.4f} seconds")
-        #print(f"Patch shape before stacking: {patch_from.shape}, {patch_to.shape}")
-        if not self.complex_valued:
-            t0 = time.time()
-            patch_from = np.stack((np.real(patch_from), np.imag(patch_from)), axis=-1).astype(np.float32)
-            patch_to = np.stack((np.real(patch_to), np.imag(patch_to)), axis=-1).astype(np.float32)
-            if self.verbose:
-                dt = time.time() - t0
-                print(f"Complex to real conversion took {dt:.4f} seconds")
         #print(f"Shape before positional encoding: {patch_from.shape}")
         if self.positional_encoding:
             t0 = time.time()
