@@ -2137,14 +2137,29 @@ class KPatchSampler(Sampler):
         self.zfiles = [Path(zf) if not isinstance(zf, (Path, int)) else zf for zf in zfiles]
 
     def __len__(self):
-        """Return the total number of samples to be drawn by the sampler."""
+        """Return the total number of samples to be drawn by the sampler.
+
+        When ``samples_per_prod > 0`` the count is exact without any I/O.
+        When ``samples_per_prod == 0`` ("all patches") the true count is only
+        known after scanning each file's array shape.  If Lightning calls
+        ``len()`` before the first ``__iter__`` (``self.beginning=True``) we
+        trigger that scan eagerly here so the DataLoader is never reported as
+        empty.  The scan is cheap (reads Zarr array metadata, not pixel data)
+        and idempotent (``__iter__`` would do the same thing).
+        """
         if self.samples_per_prod > 0:
-            # Each file contributes exactly samples_per_prod patches. It's accurate even before the first iteration (no scan needed).
+            # Exact without any scan.
             return self.samples_per_prod * len(self.dataset.get_files())
-        if self.beginning:
-            # samples_per_prod=0 means "all patches" — unknown until first scan.
-            return len(self.dataset)
-        # Post-scan: sum actual patch counts per file.
+        # samples_per_prod == 0 means "all patches per product".
+        # Ensure every file has been scanned so get_samples_by_file returns a
+        # populated list rather than an empty one.
+        for zfile in self.dataset.get_files():
+            samples = self.dataset.get_samples_by_file(zfile)
+            if samples is not None and len(samples) == 0:
+                self.dataset.calculate_patches_from_store(
+                    zfile, patch_order=self.patch_order
+                )
+        # Sum actual patch counts across all files.
         total = 0
         for zfile in self.dataset.get_files():
             lazy_coords = self.dataset.get_samples_by_file(zfile)
