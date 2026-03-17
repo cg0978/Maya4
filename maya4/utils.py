@@ -48,7 +48,7 @@ def _ensure_dataloader_dependencies() -> None:
     get_sar_dataloader = _get_sar_dataloader  # type: ignore[assignment]
 
 class SampleFilter:
-    def __init__(self, parts: Optional[List[str]]=None, years: Optional[List[int]] = None, months: Optional[List[int]] = None, polarizations: Optional[List[str]] = None, stripmap_modes: Optional[List[int]] = None):
+    def __init__(self, parts: Optional[List[str]]=None, years: Optional[List[int]] = None, months: Optional[List[int]] = None, polarizations: Optional[List[str]] = None, stripmap_modes: Optional[List[int]] = None, zarr_versions: Optional[List[int]] = None):
         """
         Initialize a filter for SAR dataset samples.
 
@@ -58,12 +58,14 @@ class SampleFilter:
             months (List[int], optional): List of months to include.
             polarizations (List[str], optional): List of polarizations to include.
             stripmap_modes (List[int], optional): List of stripmap modes to include.
+            zarr_versions (List[int], optional): List of Zarr versions to include.
         """
         self.parts = parts if parts is not None else []
         self.years = years if years is not None else []
         self.months = months if months is not None else []
         self.polarizations = polarizations if polarizations is not None else []
         self.stripmap_modes = stripmap_modes if stripmap_modes is not None else []
+        self.zarr_versions = zarr_versions if zarr_versions is not None else []
     def get_filter_dict(self) -> Dict[str, List[Union[int, str]]]:
         filter_dict = {}
         if self.parts:
@@ -76,6 +78,8 @@ class SampleFilter:
             filter_dict['polarization'] = self.polarizations
         if self.stripmap_modes:
             filter_dict['stripmap_mode'] = self.stripmap_modes
+        if self.zarr_versions:
+            filter_dict['zarr_version'] = self.zarr_versions
         return filter_dict
     def matches(self, record: dict) -> bool:
         if self.years and record.get('year') not in self.years:
@@ -88,6 +92,13 @@ class SampleFilter:
             return False
         if self.parts and record.get('part') not in self.parts:
             return False
+        if self.zarr_versions:
+            if 'full_name' in record:
+                try:
+                    if get_zarr_version(record['full_name']) not in self.zarr_versions:
+                        return False
+                except ValueError:
+                    return False
         return True
     def _filter_products(self, df: pd.DataFrame) -> pd.DataFrame:
         mask = pd.Series([True] * len(df))
@@ -101,6 +112,10 @@ class SampleFilter:
             mask &= df["polarization"].isin(self.polarizations)
         if len(self.parts) > 0:
             mask &= df["part"].isin(self.parts)
+        
+        # Zarr version filtering is handled in SARZarrDataset._build_file_list
+        # because it might require downloading metadata in online mode
+        
         return df[mask]
 
 
@@ -193,15 +208,17 @@ def get_sample_visualization(
     return plot_data, vmin, vmax
 
             
-def get_zarr_version(store_path: os.PathLike) -> int:
+def get_zarr_version(store_path: Union[str, os.PathLike]) -> int:
     import os
     import json
-    if os.path.exists(store_path / 'zarr.json'):
+    from pathlib import Path
+    store_path = Path(store_path)
+    if (store_path / 'zarr.json').exists():
         return 3
-    elif os.path.exists(store_path / '.zgroup'):
-            return 2
+    elif (store_path / '.zgroup').exists():
+        return 2
     else:
-        raise ValueError("No .zgroup or zarr.json found")
+        raise ValueError(f"No .zgroup or zarr.json found in {store_path}")
 
 def get_chunk_name_from_coords(
     y: int, x: int, zarr_file_name: str, level:str, chunks: Tuple[int, int] = (256, 256), version: int = 3
@@ -678,7 +695,11 @@ def _get_balanced_representation_samples(
             print(f"  Filling from scene types with extra samples...")
         
         # Get already selected polygons for overlap checking
-        already_selected = pd.concat([s for s in selected_samples.values() if len(s) > 0], ignore_index=True)
+        valid_samples = [s for s in selected_samples.values() if len(s) > 0]
+        if valid_samples:
+            already_selected = pd.concat(valid_samples, ignore_index=True)
+        else:
+            already_selected = pd.DataFrame(columns=df.columns)
         
         # Try to fill from scene types that have extra samples
         # First pass: ROUND-ROBIN strict overlap avoidance

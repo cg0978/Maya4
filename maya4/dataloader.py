@@ -26,7 +26,7 @@ from maya4.api import list_base_files_in_repo, list_repos_by_author
 from maya4.utils import minmax_normalize, minmax_inverse, extract_stripmap_mode_from_filename, RC_MAX, RC_MIN, GT_MAX, GT_MIN
 from maya4.api import fetch_chunk_from_hf_zarr, download_metadata_from_product
 import matplotlib.pyplot as plt
-from maya4.normalization import BaseTransformModule, SARTransform
+from maya4.normalization import BaseTransformModule, NormalizationModule, SARTransform
 from matplotlib.figure import Figure
 
 class LazyCoordinateRange:
@@ -230,7 +230,7 @@ class SARZarrDataset(Dataset):
         save_samples (bool, optional): If True, saves computed patch indices to disk. Defaults to True.
         buffer (Tuple[int, int], optional): Buffer (margin) to avoid sampling near image edges. Defaults to (100, 100).
         stride (Tuple[int, int], optional): Stride for patch extraction. Defaults to (50, 50).
-        max_base_sample_size (Tuple[int, int], optional): Maximum base sample size. Defaults to (-1, -1).
+        max_base_sample_size (Tuple[int, int]): Maximum base sample size. Defaults to (-1, -1).
         backend (str, optional): Backend for loading Zarr data, either "zarr" or "dask". Defaults to "zarr".
         verbose (bool, optional): If True, prints verbose output. Defaults to True.
         cache_size (int, optional): Maximum number of chunks to cache in memory.
@@ -345,6 +345,23 @@ class SARZarrDataset(Dataset):
         self._x_coords: Dict[os.PathLike, np.ndarray] = {}
         # self._pos_encoding_out: Dict[str, np.ndarray] = {}
         # self.init_samples()
+        # Guard against the dangerous combination: complex_valued=True + NormalizationModule.
+        # When the transform is applied to a complex numpy array, a scalar subtraction only
+        # shifts the real part; the imaginary channel ends up with a constant DC offset after
+        # inverse normalization.  ComplexNormalizationModule normalises both parts correctly.
+        if self.complex_valued and self.transform is not None:
+            t_check = getattr(self.transform, 'transform_rcmc', None) or getattr(self.transform, 'transform_from', None)
+            if isinstance(t_check, NormalizationModule):
+                import warnings
+                warnings.warn(
+                    "SARZarrDataset: complex_valued=True with NormalizationModule will produce "
+                    "incorrect normalization — scalar subtraction on a complex array only shifts "
+                    "the real part, leaving the imaginary channel with a constant DC offset after "
+                    "minmax_inverse.  Use ComplexNormalizationModule(real_min, real_max, "
+                    "imag_min, imag_max) for complex_valued=True.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         self._initialize_stores()
         if self.verbose:
             print(f"Initialized dataloader with config: buffer={buffer}, stride={stride}, patch_size={patch_size}, complex_values={complex_valued}")
@@ -358,7 +375,9 @@ class SARZarrDataset(Dataset):
         Returns:
             Tuple[int, int]: Patch size (height, width) for the specified processing level.
         """
-        
+        if self.return_whole_image and zfile is not None:
+            return self.get_whole_sample_shape(zfile)
+
         ph, pw = self._patch_size
 
         if ph > 0 and pw > 0 or zfile is None:
@@ -382,7 +401,6 @@ class SARZarrDataset(Dataset):
             pandas DataFrame containing metadata if available, None otherwise
         """
         arr = self.get_store(Path(zfile))
-        print(f"Available zarr attributes: {list(arr.attrs.keys())}")
         if 'metadata' in arr.attrs:
             import pandas as pd
             #print(arr.attrs['metadata'].keys())
@@ -437,7 +455,6 @@ class SARZarrDataset(Dataset):
             if self.verbose:
                 print(f"Found {len(repos)} repositories by author '{self.author}': {repos}")
             self.remote_files = {}
-            records = []
             for repo in repos:
                 repo_files = list_base_files_in_repo(
                     repo_id=repo,
@@ -447,25 +464,78 @@ class SARZarrDataset(Dataset):
                     print(f"Found {len(repo_files)} files in the remote repository: '{repo}'")
                 repo_name = repo.split('/')[-1]
                 self.remote_files[repo_name] = repo_files
-                
-                # Parse records incrementally to allow early exit
-                repo_records = [r for r in (parse_product_filename(os.path.join(self.data_dir, repo_name, f)) for f in repo_files) if r is not None]
-                records.extend(repo_records)
-                
-                # Stop if we have enough candidates
-                if self._max_products > 0 and len(records) >= self._max_products * 5:
-                    if self.verbose:
-                        print(f"Found enough candidates ({len(records)}), stopping repository search.")
-                    break
-            
+                records = [r for r in (parse_product_filename(os.path.join(self.data_dir, part, f)) for part, files in self.remote_files.items() for f in files) if r is not None]
+
             print(f"Total files found in remote repository: {len(records)}")
             df = pd.DataFrame(records)
         else:
-            print(f"Files in local directory {self.data_dir}: {[f.name for f in sorted(self.data_dir.glob('*'))]}")
-            records = [r for r in (parse_product_filename(f) for f in sorted(self.data_dir.glob("*"))) if r is not None]
+            found_files = sorted(self.data_dir.rglob("*.zarr"))
+            print(f"Found {len(found_files)} .zarr files in {self.data_dir}")
+            records = [r for r in (parse_product_filename(f) for f in found_files) if r is not None]
             df = pd.DataFrame(records)
         # Drop records without acquisition_date and ensure datetime type
         self._files = self.filters._filter_products(df)
+        
+        # New logic for Zarr version filtering
+        if hasattr(self.filters, 'zarr_versions') and self.filters.zarr_versions:
+             if self.verbose:
+                 print(f"Filtering files by Zarr version(s): {self.filters.zarr_versions}")
+                 
+             indices_to_keep = []
+             files_checked = 0
+             
+             for idx, row in self._files.iterrows():
+                 zfile = Path(row['full_name'])
+                 version = None
+                 files_checked += 1
+                 
+                 # Check if local
+                 if zfile.exists():
+                     try:
+                        version = get_zarr_version(zfile)
+                     except ValueError:
+                        pass
+                 elif self.online:
+                     # Download metadata to check version
+                     zfile_name = zfile.name
+                     part = str(row['part'])
+                     repo_id = f"{self.author}/{part}"
+                     local_part_dir = self.data_dir / part
+                     local_part_dir.mkdir(parents=True, exist_ok=True)
+                     
+                     if self.verbose:
+                         print(f"Downloading metadata to check version for {zfile_name}...")
+                     
+                     try:
+                         # Use download_metadata_from_product to fetch just the root metadata
+                         # Empty levels list will just fetch root files if implemented that way, 
+                         # or we can pass a dummy level if needed. 
+                         # Based on usage elsewhere, it fetches root metadata + specified levels.
+                         download_metadata_from_product(
+                             zfile_name=str(zfile_name),
+                             local_dir=str(local_part_dir),
+                             levels=[], 
+                             repo_id=repo_id,
+                             show_progress=False
+                         )
+                         
+                         if zfile.exists():
+                             try:
+                                 version = get_zarr_version(zfile)
+                             except ValueError:
+                                 pass
+                     except Exception as e:
+                         if self.verbose:
+                             print(f"Failed to check version for {zfile_name}: {e}")
+                 
+                 if version is not None and version in self.filters.zarr_versions:
+                     indices_to_keep.append(idx)
+             
+             if self.verbose:
+                 print(f"Version filtering: Kept {len(indices_to_keep)} of {files_checked} candidate files.")
+                 
+             self._files = self._files.loc[indices_to_keep].copy()
+
         self._files.sort_values(by=['full_name'], inplace=True)
         # Apply balanced sampling if enabled
         if self.use_balanced_sampling:
@@ -659,10 +729,11 @@ class SARZarrDataset(Dataset):
                     if self.verbose:
                         print(f"Successfully opened Zarr store for {zfile}")
                 except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to open Zarr archive {zfile}. "
-                        f"Error: {e}. The file may be corrupted or incomplete."
+                    print(
+                        f"[WARN] Skipping '{os.path.basename(zfile)}': "
+                        f"could not open store offline (metadata-only download?). {e}"
                     )
+                    self._files = self._files.drop(idx)
         elif self.backend == "dask":
             idx = self._files.index[self._files['full_name'] == Path(zfile)]
             if len(idx) > 0:
@@ -672,10 +743,12 @@ class SARZarrDataset(Dataset):
                     try:
                         self._files.at[idx[0], 'store'][level] = self.open_archive(complete_path)
                     except Exception as e:
-                        raise RuntimeError(
-                            f"Failed to open Dask array for {complete_path}. "
-                            f"Error: {e}. The file may be corrupted or incomplete."
+                        print(
+                            f"[WARN] Skipping '{os.path.basename(zfile)}' (level '{level}'): "
+                            f"could not open store offline (metadata-only download?). {e}"
                         )
+                        self._files = self._files.drop(idx)
+                        break  # no point opening remaining levels for a dropped file
         else:
             raise ValueError(f"Unknown backend {self.backend}")
 
@@ -742,11 +815,10 @@ class SARZarrDataset(Dataset):
             try:
                 store = zarr.open(zfile, mode='r')
                 
-                # Validate that the store has actual data, not just metadata
-                # Check if it's a group with levels or an array
-                if isinstance(store, zarr.hierarchy.Group):
-                    # For a group, check if it has members
-                    if len(store.keys()) == 0:
+                # Check "is this a valid container?"
+                if isinstance(store, zarr.Group):
+                    # Check if it's empty
+                    if len(store) == 0:
                         raise RuntimeError(
                             f"Zarr store {zfile} is incomplete: metadata exists but no data arrays found. "
                             f"Only metadata has been downloaded. Data chunks will be downloaded on-demand."
@@ -926,7 +998,7 @@ class SARZarrDataset(Dataset):
         except IndexError:
             raise RuntimeError(f"No store entry found for {zfile} in dataset files.")
     def get_max_base_sample_size(self, zfile: Union[str, os.PathLike]):
-        ph, pw =   self._max_base_sample_size
+        ph, pw = self._max_base_sample_size
         if ph == -1:
             ph = self.get_store_at_level(Path(zfile), self.level_from).shape[0]
         if pw == -1:
@@ -1080,9 +1152,15 @@ class SARZarrDataset(Dataset):
     
     def __len__(self):
         """
-        Return the total number of patches in the dataset (samples_per_prod * max_products).
+        Return the total number of patches in the dataset.
+
+        When ``samples_per_prod > 0`` this is exact: each loaded file
+        contributes exactly ``samples_per_prod`` patches.  When
+        ``samples_per_prod == 0`` the true count is unknown until the
+        sampler scans each file; ``0`` is returned as a sentinel.
         """
-        return self._samples_per_prod * self._max_products
+        n_files = len(self.get_files())
+        return self._samples_per_prod * n_files
 
     def _get_base_sample(self, zfile: os.PathLike, y: int, x: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -1193,6 +1271,20 @@ class SARZarrDataset(Dataset):
             print(f"Base sample loading for {zfile} at ({y}, {x}) took {dt:.4f} seconds")
             
             
+        #print(f"Patch shape before stacking: {patch_from.shape}, {patch_to.shape}")
+        if not self.complex_valued:
+            # Split complex → (H, W, 2) float32 BEFORE applying the transform.
+            # Real-valued normalizers (e.g. NormalizationModule) apply a scalar
+            # subtraction to the array; on a complex dtype numpy only shifts the
+            # real part, leaving the imaginary channel with a constant DC offset
+            # after inverse normalization.  Splitting first ensures both channels
+            # are real and are normalized independently and correctly.
+            t0 = time.time()
+            patch_from = np.stack((np.real(patch_from), np.imag(patch_from)), axis=-1).astype(np.float32)
+            patch_to = np.stack((np.real(patch_to), np.imag(patch_to)), axis=-1).astype(np.float32)
+            if self.verbose:
+                dt = time.time() - t0
+                print(f"Complex to real conversion took {dt:.4f} seconds")
         if self.transform:
             t0 = time.time()
             patch_from = self.transform(patch_from, self.level_from)
@@ -1200,14 +1292,6 @@ class SARZarrDataset(Dataset):
             if self.verbose:
                 dt = time.time() - t0
                 print(f"Patch transformation took {dt:.4f} seconds")
-        #print(f"Patch shape before stacking: {patch_from.shape}, {patch_to.shape}")
-        if not self.complex_valued:
-            t0 = time.time()
-            patch_from = np.stack((np.real(patch_from), np.imag(patch_from)), axis=-1).astype(np.float32)
-            patch_to = np.stack((np.real(patch_to), np.imag(patch_to)), axis=-1).astype(np.float32)
-            if self.verbose:
-                dt = time.time() - t0
-                print(f"Complex to real conversion took {dt:.4f} seconds")
         #print(f"Shape before positional encoding: {patch_from.shape}")
         if self.positional_encoding:
             t0 = time.time()
@@ -2096,18 +2180,35 @@ class KPatchSampler(Sampler):
         self.zfiles = [Path(zf) if not isinstance(zf, (Path, int)) else zf for zf in zfiles]
 
     def __len__(self):
-        """Return the total number of samples to be drawn by the sampler."""
-        if self.beginning:
-            return len(self.dataset)
-        else:
-            total = 0
-            for zfile in self.dataset.get_files():
-                lazy_coords = self.dataset.get_samples_by_file(zfile)
-                if self.samples_per_prod > 0:
-                    total += min(self.samples_per_prod, len(lazy_coords))
-                else:
-                    total += len(lazy_coords)
-            return total
+        """Return the total number of samples to be drawn by the sampler.
+
+        When ``samples_per_prod > 0`` the count is exact without any I/O.
+        When ``samples_per_prod == 0`` ("all patches") the true count is only
+        known after scanning each file's array shape.  If Lightning calls
+        ``len()`` before the first ``__iter__`` (``self.beginning=True``) we
+        trigger that scan eagerly here so the DataLoader is never reported as
+        empty.  The scan is cheap (reads Zarr array metadata, not pixel data)
+        and idempotent (``__iter__`` would do the same thing).
+        """
+        if self.samples_per_prod > 0:
+            # Exact without any scan.
+            return self.samples_per_prod * len(self.dataset.get_files())
+        # samples_per_prod == 0 means "all patches per product".
+        # Ensure every file has been scanned so get_samples_by_file returns a
+        # populated list rather than an empty one.
+        for zfile in self.dataset.get_files():
+            samples = self.dataset.get_samples_by_file(zfile)
+            if samples is not None and len(samples) == 0:
+                self.dataset.calculate_patches_from_store(
+                    zfile, patch_order=self.patch_order
+                )
+        # Sum actual patch counts across all files.
+        total = 0
+        for zfile in self.dataset.get_files():
+            lazy_coords = self.dataset.get_samples_by_file(zfile)
+            if lazy_coords is not None:
+                total += len(lazy_coords)
+        return total
 
 class SARDataloader(DataLoader):
     dataset: SARZarrDataset
@@ -2161,14 +2262,14 @@ def get_sar_dataloader(
     geographic_clustering: bool = False,  # Enable geographic clustering
     n_clusters: int = 10,  # Number of geographic clusters, 
     use_balanced_sampling: bool = True, 
-    split: str = "train"
+    split: str = "train",
+    zarr_version: Optional[Union[int, List[int]]] = None
 ) -> SARDataloader:
     """
     Create and return a PyTorch DataLoader for SAR data using SARZarrDataset and KPatchSampler.
 
     Args:
         data_dir (str): Path to the directory containing SAR data.
-        file_pattern (str, optional): Glob pattern for Zarr files. Defaults to "*.zarr".
         batch_size (int, optional): Number of samples per batch. Defaults to 8.
         num_workers (int, optional): Number of subprocesses for data loading. Defaults to 2.
         return_whole_image (bool, optional): If True, returns the whole image. Defaults to False.
@@ -2194,10 +2295,19 @@ def get_sar_dataloader(
         geographic_clustering (bool, optional): If True, clusters data by geographic location. Defaults to False.
         n_clusters (int, optional): Number of geographic clusters when clustering is enabled. Defaults to 10.
         split (str, optional): Dataset split to use (e.g., "train", "val", "test"). Defaults to "train".
+        zarr_version (Optional[Union[int, List[int]]], optional): Zarr version(s) to filter by. Defaults to None.
 
     Returns:
         SARDataloader: PyTorch DataLoader for the SAR dataset.
     """
+    if zarr_version is not None:
+        if filters is None:
+            filters = SampleFilter()
+        if isinstance(zarr_version, int):
+            filters.zarr_versions = [zarr_version]
+        elif isinstance(zarr_version, list):
+            filters.zarr_versions = zarr_version
+
     dataset = SARZarrDataset(
         data_dir=data_dir,
         filters=filters,
