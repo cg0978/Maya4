@@ -549,7 +549,7 @@ class SARZarrDataset(Dataset):
                  
              self._files = self._files.loc[indices_to_keep].copy()
 
-        self._files.sort_values(by=['full_name'], inplace=True)
+        self._files = self._files.sort_values(by=['full_name']).reset_index(drop=True)
         # Apply balanced sampling if enabled
         if self.use_balanced_sampling:
                 balanced_files = get_balanced_sample_files(

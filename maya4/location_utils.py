@@ -12,6 +12,8 @@ Author: SAR Processing Team
 Date: October 2025
 """
 
+import contextlib
+import io
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -66,8 +68,6 @@ def extract_location_from_zarr_filename_with_phidown(zarr_filename: str) -> Opti
     Returns:
         Dictionary with location information
     """
-    from phidown.search import CopernicusDataSearcher
-    
     result = {
         'coordinates': None,
         'footprint': None,
@@ -75,6 +75,15 @@ def extract_location_from_zarr_filename_with_phidown(zarr_filename: str) -> Opti
         'success': False,
         'error': None
     }
+
+    try:
+        # Some phidown optional binary dependencies emit noisy import-time output
+        # before falling back to a compatible implementation. Keep notebook output clean.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            from phidown.search import CopernicusDataSearcher
+    except Exception as exc:
+        result['error'] = f"phidown import failed: {exc}"
+        return result
     
     # Remove .zarr extension if present
     result['part'] = get_part_from_filename(zarr_filename)
