@@ -1,0 +1,8 @@
+{
+  "lint.log": 0,
+  "pytest.log": 0,
+  "build.log": 0,
+  "artifact_contents.log": 0,
+  "wheel_smoke.log": 0,
+  "network_smoke.log": 0
+}

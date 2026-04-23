@@ -1,92 +1,86 @@
-"""
-Test script to verify the dataloader online mode fixes.
-"""
-import sys
+"""Live bucket smoke tests, disabled by default for CI stability."""
+
+from __future__ import annotations
+
 import os
-from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath('.'))
+import pytest
+import zarr
 
-from maya4 import get_sar_dataloader
+from maya4 import (
+    DEFAULT_BUCKET_ID,
+    download_metadata_from_product,
+    fetch_chunk_from_bucket_zarr,
+    get_sar_dataloader,
+    list_base_files_in_bucket,
+)
 
-# Define data directory
-DATA_DIR = os.path.abspath('data')
-print(f'Data directory: {DATA_DIR}')
-print(f'Directory exists: {os.path.exists(DATA_DIR)}')
+pytestmark = pytest.mark.network
 
-# Check existing files
-if os.path.exists(DATA_DIR):
-    zarr_files = list(Path(DATA_DIR).rglob('*.zarr'))
-    print(f'Found {len(zarr_files)} Zarr files locally')
-    if zarr_files:
-        print('Sample files:')
-        for zf in zarr_files[:3]:
-            print(f'  - {zf}')
-else:
-    print('Creating data directory...')
-    os.makedirs(DATA_DIR, exist_ok=True)
 
-print('\n' + '='*80)
-print('Testing dataloader with online=True and verbose=True')
-print('='*80 + '\n')
+def _network_enabled() -> bool:
+    return os.getenv("MAYA4_RUN_NETWORK_TESTS") == "1"
 
-try:
-    # Create a SAR dataloader with online mode enabled
+
+@pytest.mark.skipif(not _network_enabled(), reason="set MAYA4_RUN_NETWORK_TESTS=1 to run live bucket smoke tests")
+def test_live_bucket_smoke(tmp_path):
+    product = next(name for name in list_base_files_in_bucket(DEFAULT_BUCKET_ID, relative_path=True) if name.endswith(".zarr"))
+
+    download_metadata_from_product(
+        zfile_name=product,
+        local_dir=tmp_path,
+        bucket_id=DEFAULT_BUCKET_ID,
+        levels=["rcmc", "az"],
+        show_progress=False,
+    )
+    fetch_chunk_from_bucket_zarr(
+        level="rcmc",
+        y=0,
+        x=0,
+        local_dir=tmp_path,
+        bucket_id=DEFAULT_BUCKET_ID,
+        zarr_archive=product,
+        show_progress=False,
+    )
+    fetch_chunk_from_bucket_zarr(
+        level="az",
+        y=0,
+        x=0,
+        local_dir=tmp_path,
+        bucket_id=DEFAULT_BUCKET_ID,
+        zarr_archive=product,
+        show_progress=False,
+    )
+
+    rcmc = zarr.open_array(str(tmp_path / product / "rcmc"), mode="r")
+    az = zarr.open_array(str(tmp_path / product / "az"), mode="r")
+    assert rcmc.shape == az.shape
+    assert rcmc.chunks == az.chunks
+
     loader = get_sar_dataloader(
-        data_dir=DATA_DIR,
-        level_from='rcmc',
-        level_to='az',
-        batch_size=16,
+        data_dir=str(tmp_path),
+        bucket_id=DEFAULT_BUCKET_ID,
+        level_from="rcmc",
+        level_to="az",
+        batch_size=1,
         num_workers=0,
-        patch_mode='rectangular',
-        patch_size=(1, 1000),
-        buffer=(1000, 1000),
-        stride=(1, 1000),
+        patch_mode="rectangular",
+        patch_size=(128, 128),
+        buffer=(0, 0),
+        stride=(128, 128),
         shuffle_files=False,
-        patch_order='chunk',
+        patch_order="chunk",
         complex_valued=True,
         save_samples=False,
-        backend='zarr',
-        verbose=True,  # Enable verbose to see what's happening
-        samples_per_prod=100,  # Small number for testing
-        cache_size=100,
-        online=True,  # Will attempt to download from HuggingFace
-        max_products=1,  # Just test with 1 product
-        use_balanced_sampling=False  # Disable for simple test - needs minimum ~10 products
+        backend="zarr",
+        verbose=False,
+        samples_per_prod=1,
+        cache_size=8,
+        online=True,
+        max_products=1,
+        use_balanced_sampling=False,
     )
-    
-    print('\n' + '='*80)
-    print('Dataloader created successfully!')
-    print('='*80)
-    print(f'\nDataset found {len(loader.dataset._files)} files')
-    
-    if len(loader.dataset._files) > 0:
-        print('\nFirst file info:')
-        print(loader.dataset._files.iloc[0])
-        
-        # Try to iterate through one batch
-        print('\n' + '='*80)
-        print('Testing batch iteration...')
-        print('='*80 + '\n')
-        
-        for i, (x_batch, y_batch) in enumerate(loader):
-            print(f'✓ Batch {i}: x_batch shape {x_batch.shape}, y_batch shape {y_batch.shape}')
-            if i >= 2:  # Just test first 3 batches
-                break
-        
-        print('\n' + '='*80)
-        print('✓ SUCCESS: All tests passed!')
-        print('='*80)
-    else:
-        print('\n⚠ Warning: No files found in dataset')
 
-except Exception as e:
-    print(f'\n✗ ERROR: {type(e).__name__}: {e}')
-    import traceback
-    print('\nFull traceback:')
-    traceback.print_exc()
-    print('\n' + '='*80)
-    print('TEST FAILED')
-    print('='*80)
-    sys.exit(1)
+    x_batch, y_batch = next(iter(loader))
+    assert x_batch.shape[0] == 1
+    assert y_batch.shape[0] == 1

@@ -1,124 +1,71 @@
-"""
-Test script to verify maya4 package installation and imports.
-"""
+"""Basic package import and transform smoke tests."""
+
+import tomllib
+from pathlib import Path
+
+import numpy as np
+
+import maya4
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_project_metadata() -> dict:
+    with (PROJECT_ROOT / "pyproject.toml").open("rb") as handle:
+        return tomllib.load(handle)["project"]
+
 
 def test_imports():
-    """Test that all main components can be imported."""
-    print('Testing maya4 imports...')
-    
-    try:
-        # Test main components
-        from maya4 import (
-            SARZarrDataset,
-            KPatchSampler,
-            get_sar_dataloader,
-            SARDataloader,
-            SARTransform,
-            SampleFilter,
-        )
-        print('✓ Main dataloader components imported successfully')
-        
-        # Test normalization modules
-        from maya4 import (
-            NormalizationModule,
-            ComplexNormalizationModule,
-            IdentityModule,
-            BaseTransformModule,
-        )
-        print('✓ Normalization modules imported successfully')
-        
-        # Test API utilities
-        from maya4 import (
-            list_base_files_in_repo,
-            fetch_chunk_from_hf_zarr,
-            download_metadata_from_product,
-        )
-        print('✓ API utilities imported successfully')
-        
-        # Test utility functions
-        from maya4 import (
-            get_chunk_name_from_coords,
-            get_sample_visualization,
-            minmax_normalize,
-            minmax_inverse,
-            RC_MAX, RC_MIN, GT_MAX, GT_MIN,
-        )
-        print('✓ Utility functions imported successfully')
-        
-        # Test location utilities
-        from maya4 import (
-            get_products_spatial_mapping,
-        )
-        print('✓ Location utilities imported successfully')
-        
-        print('\\n✅ All imports successful!')
-        print(f'\\nPackage version: {maya4.__version__}')
-        print(f'Package author: {maya4.__author__}')
-        
-        return True
-        
-    except ImportError as e:
-        print(f'\\n❌ Import failed: {e}')
-        return False
+    project = _load_project_metadata()
+
+    from maya4 import (
+        BaseTransformModule,
+        ComplexNormalizationModule,
+        KPatchSampler,
+        NormalizationModule,
+        SampleFilter,
+        SARDataloader,
+        SARTransform,
+        SARZarrDataset,
+        download_metadata_from_product,
+        fetch_chunk_from_bucket_zarr,
+        list_base_files_in_bucket,
+    )
+
+    assert SARZarrDataset is not None
+    assert KPatchSampler is not None
+    assert SARDataloader is not None
+    assert SARTransform is not None
+    assert SampleFilter is not None
+    assert BaseTransformModule is not None
+    assert NormalizationModule is not None
+    assert ComplexNormalizationModule is not None
+    assert list_base_files_in_bucket is not None
+    assert fetch_chunk_from_bucket_zarr is not None
+    assert download_metadata_from_product is not None
+    assert maya4.__version__ == project["version"]
+    assert maya4.__author__ == "Roberto Del Prete"
+
+
+def test_repository_version_consistency():
+    project = _load_project_metadata()
+
+    assert project["name"] == "maya4"
+    assert project["requires-python"] == ">=3.12"
+    assert maya4.__version__ == project["version"]
 
 
 def test_basic_functionality():
-    """Test basic functionality of key components."""
-    print('\\nTesting basic functionality...')
-    
-    try:
-        from maya4 import SARTransform, RC_MIN, RC_MAX, GT_MIN, GT_MAX
-        
-        # Create a transform
-        transforms = SARTransform.create_minmax_normalized_transform(
-            normalize=True,
-            rc_min=RC_MIN,
-            rc_max=RC_MAX,
-            gt_min=GT_MIN,
-            gt_max=GT_MAX,
-            complex_valued=True
-        )
-        print('✓ SARTransform created successfully')
-        
-        # Test normalization
-        import numpy as np
-        test_data = np.array([1000.0 + 1000.0j], dtype=np.complex128)
-        normalized = transforms(test_data, 'rcmc')
-        print(f'✓ Normalization test: {test_data[0]} -> {normalized[0]}')
-        
-        print('\\n✅ Basic functionality tests passed!')
-        return True
-        
-    except Exception as e:
-        print(f'\\n❌ Functionality test failed: {e}')
-        import traceback
-        traceback.print_exc()
-        return False
+    transforms = maya4.SARTransform.create_minmax_normalized_transform(
+        normalize=True,
+        rc_min=maya4.RC_MIN,
+        rc_max=maya4.RC_MAX,
+        gt_min=maya4.GT_MIN,
+        gt_max=maya4.GT_MAX,
+        complex_valued=True,
+    )
 
+    test_data = np.array([1000.0 + 1000.0j], dtype=np.complex128)
+    normalized = transforms(test_data, "rcmc")
 
-if __name__ == '__main__':
-    import maya4
-    
-    print('='*60)
-    print('MAYA4 PACKAGE INSTALLATION TEST')
-    print('='*60)
-    print()
-    
-    # Test imports
-    imports_ok = test_imports()
-    
-    # Test functionality if imports succeeded
-    if imports_ok:
-        functionality_ok = test_basic_functionality()
-    else:
-        functionality_ok = False
-    
-    print()
-    print('='*60)
-    if imports_ok and functionality_ok:
-        print('✅ ALL TESTS PASSED')
-        print('The maya4 package is installed and working correctly!')
-    else:
-        print('❌ SOME TESTS FAILED')
-        print('Please check the error messages above.')
-    print('='*60)
+    assert normalized.shape == test_data.shape

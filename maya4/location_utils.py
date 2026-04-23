@@ -12,8 +12,8 @@ Author: SAR Processing Team
 Date: October 2025
 """
 
-from phidown.search import CopernicusDataSearcher
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Union
 import time
@@ -40,7 +40,7 @@ def create_valid_datetime_string(date_str: str) -> Optional[str]:
 
 def get_part_from_filename(filename: Union[os.PathLike, str]) -> Optional[str]:
     """
-    Extract the part (e.g., PT1, PT2) from a filename formatted as .../{part}/s1a-s{number}-raw-s-{polarization}-...zarr.
+    Extract a legacy partition name from a nested local path.
 
     Args:
         filename (str): The filename to parse.
@@ -48,12 +48,13 @@ def get_part_from_filename(filename: Union[os.PathLike, str]) -> Optional[str]:
     Returns:
         Optional[str]: The part if found, else None.
     """
-    try:
-        part = str(filename).split(os.path.sep)[-2]
-    except IndexError:
-        print(f"Warning: could not extract part from filename '{filename}', using PT1 as part.")
-        part = "PT1"
-    return part
+    path = Path(filename)
+    if path.suffix != ".zarr":
+        path = Path(str(filename).rstrip(os.path.sep))
+    parent = path.parent.name
+    if parent.upper().startswith("PT") and parent[2:].isdigit():
+        return parent.upper()
+    return None
 
 def extract_location_from_zarr_filename_with_phidown(zarr_filename: str) -> Optional[Dict]:
     """
@@ -85,8 +86,8 @@ def extract_location_from_zarr_filename_with_phidown(zarr_filename: str) -> Opti
     # Format: s1a-s1-raw-s-vv-20230331t123129-20230331t123154-047888-05c119
     parts = product_name.split('-')
     
-    if len(parts) < 8:
-        result['error'] = f"Invalid filename format: expected at least 8 parts, got {len(parts)}"
+    if len(parts) < 9:
+        result['error'] = f"Invalid filename format: expected at least 9 parts, got {len(parts)}"
         return result
     
     # Extract components
@@ -150,6 +151,17 @@ def extract_location_from_zarr_filename_with_phidown(zarr_filename: str) -> Opti
         product = df_search.iloc[0]
         # Extract footprint (WKT polygon)
         result['coordinates'] = product['GeoFootprint']['coordinates']
+        coords = result['coordinates']
+        if coords:
+            polygon = coords[0] if isinstance(coords[0][0], (list, tuple)) else coords
+            longitudes = [point[0] for point in polygon]
+            latitudes = [point[1] for point in polygon]
+            result['longitude'] = float(np.mean(longitudes))
+            result['latitude'] = float(np.mean(latitudes))
+        else:
+            result['longitude'] = None
+            result['latitude'] = None
+        result['success'] = True
     else:
         print("No matching products found for product .")
 
@@ -187,45 +199,40 @@ def find_sar_products(root_dir: str, extensions: List[str] = ['.zarr']) -> List[
     
     return product_files
 
-def get_products_spatial_mapping(author: str, repos: List[str], data_dir: Union[str, os.PathLike], verbose: bool = True, extensions: List[str] = ['.zarr'], output_csv_file_path: Optional[Union[str, os.PathLike]] = None, overwrite_csv: bool = False) -> pd.DataFrame:
+def get_products_spatial_mapping(
+    author: Optional[str] = None,
+    repos: Optional[List[str]] = None,
+    data_dir: Union[str, os.PathLike] = ".",
+    verbose: bool = True,
+    extensions: List[str] = [".zarr"],
+    output_csv_file_path: Optional[Union[str, os.PathLike]] = None,
+    overwrite_csv: bool = False,
+    bucket_id: str = "ESA-philab/Maya4",
+) -> pd.DataFrame:
     """
-    Get spatial mapping (latitude, longitude) for a list of products.
-    
-    Args:
-        products (List[str]): List of product names
-        mapping_df (pd.DataFrame): DataFrame containing product to spatial mapping  with columns ['product_name', 'latitude', 'longitude']
+    Get spatial mapping (latitude, longitude) for products discovered in the bucket.
     """
     all_products = []
 
-    # try:
-    from maya4.api import list_repos_by_author, list_base_files_in_repo
+    from maya4.api import list_base_files_in_bucket
 
     if not overwrite_csv and output_csv_file_path is not None and os.path.exists(Path(output_csv_file_path)):
         df = pd.read_csv(Path(output_csv_file_path))
         return df
-    
-    for part in repos:
 
-        repos = list_repos_by_author(author)
-        
-        part_repos = [repo for repo in repos if part.lower() in repo.lower()]
+    bucket_files = list_base_files_in_bucket(bucket_id=bucket_id, relative_path=True)
+    for filename in bucket_files:
+        if any(filename.endswith(ext) for ext in extensions):
+            all_products.append(
+                {
+                    "source": "remote_hf_bucket",
+                    "bucket_id": bucket_id,
+                    "part": None,
+                    "filename": filename,
+                    "full_path": f"hf://buckets/{bucket_id}/{filename}",
+                }
+            )
 
-        for repo in part_repos:
-            print(f"    Scanning repository: {repo}")
-            repo_files = list_base_files_in_repo(f"{repo}")
-            
-            for filename in repo_files:
-                # filename = file_info.get('filename', '')
-                if any(filename.endswith(ext) for ext in extensions):
-                    # Create a remote product entry
-                    remote_product = {
-                        'source': 'remote_hf',
-                        'repo': repo,
-                        'part': part,
-                        'filename': filename,
-                        'full_path': f"hf://{repo}/{filename}",
-                    }
-                    all_products.append(remote_product)
     if verbose:
         print(f"Remote products found: {len(all_products)}")
         print("="*60)
@@ -254,8 +261,12 @@ def get_products_spatial_mapping(author: str, repos: List[str], data_dir: Union[
             
             # Extract location info from remote product using phidown
             filename = remote_product.get('filename', '') if isinstance(remote_product, dict) else str(remote_product)
-            part = remote_product.get('part', '') if isinstance(remote_product, dict) else 'PT1'
-            product_info = extract_location_from_zarr_filename_with_phidown(f"{data_dir}/{part}/{filename}")
+            part = remote_product.get("part") if isinstance(remote_product, dict) else None
+            if part:
+                zarr_path = Path(data_dir) / part / filename
+            else:
+                zarr_path = Path(data_dir) / filename
+            product_info = extract_location_from_zarr_filename_with_phidown(str(zarr_path))
             product_data.append(product_info)
         
         # Create DataFrame
@@ -266,17 +277,15 @@ def get_products_spatial_mapping(author: str, repos: List[str], data_dir: Union[
             print("SAVING DATA TO CSV")
             print("="*60)
 
-    # Create output directory if it doesn't exist
-    output_dir = Path(str(output_csv_file_path)).parent
-    output_dir.mkdir(exist_ok=True)
-    from datetime import datetime
-    # Generate timestamp for unique filename
+    if output_csv_file_path is not None:
+        output_dir = Path(str(output_csv_file_path)).parent
+        output_dir.mkdir(exist_ok=True)
 
     try:
-        # Save the complete DataFrame to CSV
-        products_df.to_csv(output_csv_file_path, index=False)
-        if verbose: 
-            print(f"✅ Successfully saved {len(products_df)} products to: {output_csv_file_path}")
+        if output_csv_file_path is not None:
+            products_df.to_csv(output_csv_file_path, index=False)
+            if verbose:
+                print(f"✅ Successfully saved {len(products_df)} products to: {output_csv_file_path}")
 
     except Exception as e:
         print(f"❌ Error saving to CSV: {e}")
@@ -285,13 +294,14 @@ def get_products_spatial_mapping(author: str, repos: List[str], data_dir: Union[
 
 
 def get_sar_product_locations(
-    author: str,
-    repos: List[str],
-    data_dir: Union[str, os.PathLike],
+    author: Optional[str] = None,
+    repos: Optional[List[str]] = None,
+    data_dir: Union[str, os.PathLike] = ".",
     verbose: bool = True,
     extensions: List[str] = ['.zarr'],
     output_csv_file_path: Optional[Union[str, os.PathLike]] = None,
-    overwrite_csv: bool = False
+    overwrite_csv: bool = False,
+    bucket_id: str = "ESA-philab/Maya4",
 ) -> pd.DataFrame:
     """Backward-compatible wrapper for legacy notebooks.
 
@@ -299,13 +309,14 @@ def get_sar_product_locations(
     original function signature used throughout older notebooks.
     """
     return get_products_spatial_mapping(
-        author=author,
-        repos=repos,
         data_dir=data_dir,
         verbose=verbose,
         extensions=extensions,
         output_csv_file_path=output_csv_file_path,
-        overwrite_csv=overwrite_csv
+        overwrite_csv=overwrite_csv,
+        bucket_id=bucket_id,
+        author=author,
+        repos=repos,
     )
 
 
@@ -330,7 +341,7 @@ def get_location_for_zarr_file(zarr_path: str) -> Tuple[Optional[float], Optiona
     filename = Path(zarr_path).name
     
     # Use phidown to get location
-    location_info = _extract_location(filename)
+    location_info = extract_location_from_zarr_filename_with_phidown(filename)
     
     if location_info and location_info['success']:
         return location_info['latitude'], location_info['longitude']

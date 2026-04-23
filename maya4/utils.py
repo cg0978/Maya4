@@ -1,16 +1,14 @@
 import os
 import re
-import pandas as pd
-import matplotlib.pyplot as plt
-from typing import Union, Optional, Tuple
-from pathlib import Path
-import numpy as np
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Union
-from maya4.location_utils import get_products_spatial_mapping
-from maya4.splits import create_balanced_splits
-import torch # todo: remove if not needed
-import zarr # todo: remove if not needed
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch  # todo: remove if not needed
+import zarr  # todo: remove if not needed
 
 LOCATIONS_CSV_FILENAME = 'sar_products_locations.csv'
 
@@ -36,8 +34,8 @@ def _ensure_dataloader_dependencies() -> None:
         return
 
     try:
-        from dataloader.normalization import SARTransform as _SARTransform  # type: ignore
-        from dataloader.dataloader import get_sar_dataloader as _get_sar_dataloader  # type: ignore
+        from maya4.normalization import SARTransform as _SARTransform
+        from maya4.dataloader import get_sar_dataloader as _get_sar_dataloader
     except ImportError as exc:  # pragma: no cover - defensive
         raise ImportError(
             "Unable to import dataloader helpers (SARTransform, get_sar_dataloader). "
@@ -110,7 +108,7 @@ class SampleFilter:
             mask &= df["stripmap_mode"].isin(self.stripmap_modes)
         if len(self.polarizations) > 0:
             mask &= df["polarization"].isin(self.polarizations)
-        if len(self.parts) > 0:
+        if len(self.parts) > 0 and "part" in df.columns and df["part"].notna().any():
             mask &= df["part"].isin(self.parts)
         
         # Zarr version filtering is handled in SARZarrDataset._build_file_list
@@ -257,26 +255,38 @@ def extract_stripmap_mode_from_filename(filename: Union[os.PathLike, str]) -> Op
     if isinstance(filename, os.PathLike):
         filename = str(filename)
     import re
-    match = re.search(r's(\d)a-s(\d)-', filename)
+    match = re.search(r"s\d[a-z]-s(\d+)-", filename, re.IGNORECASE)
     if match:
-        return int(match.group(2))
+        return int(match.group(1))
     return None
 def get_part_from_filename(filename: Union[os.PathLike, str]) -> Optional[str]:
     """
-    Extract the part (e.g., PT1, PT2) from a filename formatted as .../{part}/s1a-s{number}-raw-s-{polarization}-...zarr.
+    Extract a legacy partition name (e.g. PT1) from a nested local path.
 
     Args:
         filename (str): The filename to parse.
 
     Returns:
-        Optional[str]: The part if found, else None.
+        Optional[str]: The legacy part name if present, else None.
     """
-    try:
-        part = str(filename).split(os.path.sep)[-2]
-    except IndexError:
-        print(f"Warning: could not extract part from filename '{filename}', using PT1 as part.")
-        part = "PT1"
-    return part
+    path = Path(filename)
+    if path.suffix != ".zarr":
+        path = Path(str(filename).rstrip(os.path.sep))
+    parent = path.parent.name
+    if re.fullmatch(r"PT\d+", parent, re.IGNORECASE):
+        return parent.upper()
+    return None
+
+
+def build_local_product_path(
+    data_dir: Union[str, os.PathLike],
+    filename: Union[str, os.PathLike],
+    part: Optional[str] = None,
+) -> Path:
+    """Resolve a product path for both flat bucket mirrors and legacy nested PT layouts."""
+    if part:
+        return Path(data_dir) / part / Path(filename).name
+    return Path(data_dir) / Path(filename).name
 
 def parse_product_filename(filename: Union[str, os.PathLike]) -> dict:
     """
@@ -287,35 +297,32 @@ def parse_product_filename(filename: Union[str, os.PathLike]) -> dict:
     Returns:
         dict: A dictionary with extracted metadata.
     """
-    # Example: s1a-s6-raw-s-vv-20210614t121147-20210614t121217-051942-0646ac.zarr
-    sep = re.escape(os.sep)
+    basename = Path(filename).name
     pattern = (
-        rf"(?P<part>[a-zA-Z0-9]+){sep}s1a-s(?P<stripmap_mode>[a-zA-Z0-9]+)-raw-s-(?P<polarization>[a-zA-Z0-9]+)-"
-        r"(?P<start_date>\d{8})t\d+-\d{8}t\d+-\d+-[a-zA-Z0-9]+\.zarr"
+        r"^(?P<satellite>s\d[a-z])-s(?P<stripmap_mode>\d+)-raw-s-(?P<polarization>[a-zA-Z0-9]+)-"
+        r"(?P<start_ts>\d{8}t\d{6})-(?P<end_ts>\d{8}t\d{6})-(?P<orbit>\d+)-(?P<data_take>[a-zA-Z0-9]+)\.zarr$"
     )
-    f_name = str(os.path.join(str(filename).split(os.path.sep)[-2], str(filename).split(os.path.sep)[-1]))
-    match = re.match(pattern, f_name)
+    match = re.match(pattern, basename, re.IGNORECASE)
     if not match:
         return None
     stripmap_mode = match.group("stripmap_mode")
-    polarization = match.group("polarization")
-    start_date = match.group("start_date")
-    part = match.group("part")
-    # Remove -s{stripmap_mode} and -{polarization} from product name
-    product_name = re.sub(r"-s\d+-raw-s-\w+-", "-", str(os.path.basename(filename)))
-    product_name = product_name.split(".zarr")[0]
-    acquisition_date = datetime.strptime(start_date, "%Y%m%d")
+    polarization = match.group("polarization").lower()
+    start_ts = match.group("start_ts")
+    acquisition_date = datetime.strptime(start_ts, "%Y%m%dT%H%M%S")
+    part = get_part_from_filename(filename)
+    product_name = re.sub(r"-s\d+-raw-s-\w+-", "-", basename, flags=re.IGNORECASE).split(".zarr")[0]
     return {
         "product_name": product_name,
+        "satellite": match.group("satellite").lower(),
         "stripmap_mode": int(stripmap_mode),
         "polarization": polarization,
         "acquisition_date": acquisition_date,
-        "full_name": Path(filename), 
+        "full_name": Path(filename),
         "part": part,
         "store": None,
-        "lat": None, 
-        "lon": None, 
-        "samples": [] 
+        "lat": None,
+        "lon": None,
+        "samples": [],
     }
 
 def display_inference_results(input_data, gt_data, pred_data = None, figsize=(20, 6), vminmax=(0, 1000), show: bool=True, save: bool=True, save_path: str="./visualizations/", return_figure: bool=False):
@@ -414,8 +421,7 @@ def get_balanced_sample_files(
     min_samples_per_cluster: int = 1,
     verbose: bool = False, 
     n_clusters: int = 20,
-    repo_author: str = 'Maya4', 
-    repos: List[str] = ['PT1', 'PT2', 'PT3', 'PT4']
+    bucket_id: str = "ESA-philab/Maya4",
 ) -> List[str]:
     """
     Get a balanced sample of SAR product files ensuring equal representation across
@@ -440,6 +446,9 @@ def get_balanced_sample_files(
     
     if verbose:
         print(f"Getting balanced sample of {max_samples} files from {split_type} set...")
+
+    from maya4.location_utils import get_products_spatial_mapping
+    from maya4.splits import create_balanced_splits
     
     # Determine the CSV file path
     if config_path is None: 
@@ -455,11 +464,10 @@ def get_balanced_sample_files(
         locations_csv = os.path.join(os.path.dirname(csv_path), LOCATIONS_CSV_FILENAME)
         if not os.path.exists(locations_csv):
             df = get_products_spatial_mapping(
-                author=repo_author,
-                repos=repos,
                 data_dir=data_dir,
                 output_csv_file_path=locations_csv,
-                overwrite_csv=False, 
+                overwrite_csv=False,
+                bucket_id=bucket_id,
                 verbose=False
             )
             locations_csv = os.path.join(data_dir, LOCATIONS_CSV_FILENAME)
@@ -486,10 +494,9 @@ def get_balanced_sample_files(
     # Load the split data
     
     files = df['filename'].tolist()
-    parts = df['part'].tolist()
-    
-    # Create full paths for filtering
-    full_paths = [os.path.join(data_dir, part, f) for part, f in zip(parts, files)]
+    parts = df["part"].tolist() if "part" in df.columns else [None] * len(files)
+
+    full_paths = [build_local_product_path(data_dir, f, part if pd.notna(part) else None) for part, f in zip(parts, files)]
     
     # Parse product filenames for filtering
     records = [r for r in (parse_product_filename(fp) for fp in full_paths) if r is not None]
@@ -1005,6 +1012,7 @@ def create_dataloader_from_config(data_dir, dataloader_cfg, split_cfg, transform
 
     base_config = {
         'data_dir': data_dir,
+        'bucket_id': dataloader_cfg.get('bucket_id', 'ESA-philab/Maya4'),
         'level_from': dataloader_cfg.get('level_from', 'rcmc'),
         'level_to': dataloader_cfg.get('level_to', 'az'),
         'num_workers': dataloader_cfg.get('num_workers', 0),  # Default to 0 to prevent worker crashes
@@ -1045,7 +1053,6 @@ def create_dataloader_from_config(data_dir, dataloader_cfg, split_cfg, transform
 
 def create_dataloaders(dataloader_cfg):
     """Create train, validation, and test dataloaders (same as original)."""
-    # Import here to avoid circular import
     from maya4.location_utils import get_products_spatial_mapping
     
     data_dir = dataloader_cfg.get('data_dir', '/Data/sar_focusing_new')
@@ -1055,11 +1062,10 @@ def create_dataloaders(dataloader_cfg):
     if not os.path.exists(locations_csv_path):
         print(f"📍 Creating product locations CSV at {locations_csv_path}...")
         get_products_spatial_mapping(
-            author=dataloader_cfg.get('author', 'Maya4'), 
-            repos=dataloader_cfg.get('repos', ['PT1', 'PT2', 'PT3', 'PT4']), 
-            data_dir=data_dir, 
+            data_dir=data_dir,
             output_csv_file_path=locations_csv_path,
-            overwrite_csv=False
+            overwrite_csv=False,
+            bucket_id=dataloader_cfg.get('bucket_id', 'ESA-philab/Maya4'),
         )
     else:
         print(f"✓ Using existing product locations CSV: {locations_csv_path}")

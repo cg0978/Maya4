@@ -1,0 +1,10 @@
+timestamp=20260423T114119+02:00
+python=3.12.9 | packaged by conda-forge | (main, Mar  4 2025, 22:44:42) [Clang 18.1.8 ]
+executable=/opt/miniconda3/bin/python
+platform=macOS-26.2-arm64-arm-64bit
+huggingface_hub=1.10.1
+zarr=3.1.6
+torch=2.11.0
+pandas=2.3.2
+nbclient=0.10.2
+nbformat=5.10.4

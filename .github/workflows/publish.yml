@@ -1,0 +1,109 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    name: Build and publish package
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4
+        with:
+          python-version: "3.12"
+          cache: true
+
+      - name: Install dependencies
+        run: pdm install -G dev
+
+      - name: Validate version and tag contract
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import tomllib
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+          pyproject_version = pyproject["project"]["version"]
+
+          init_text = Path("maya4/__init__.py").read_text()
+          match = re.search(r'^__version__\s*=\s*[\'"]([^\'"]+)[\'"]', init_text, re.MULTILINE)
+          if match is None:
+              raise SystemExit("Could not find __version__ in maya4/__init__.py")
+
+          package_version = match.group(1)
+          release_tag = os.environ["RELEASE_TAG"]
+          expected_tag = f"v{pyproject_version}"
+
+          if pyproject_version != package_version:
+              raise SystemExit(
+                  f"Version mismatch: pyproject.toml has {pyproject_version}, maya4/__init__.py has {package_version}"
+              )
+          if release_tag != expected_tag:
+              raise SystemExit(f"Tag mismatch: expected {expected_tag}, got {release_tag}")
+
+          print(f"Validated package version {pyproject_version} for tag {release_tag}")
+          PY
+
+      - name: Run linters
+        run: |
+          pdm run black --check maya4/__init__.py tests
+          pdm run isort --check-only maya4/__init__.py tests
+          pdm run flake8 --extend-ignore=E501 maya4/__init__.py tests
+
+      - name: Run offline tests
+        run: pdm run pytest -q -m "not network"
+
+      - name: Build distributions
+        run: |
+          rm -rf build dist
+          pdm build
+
+      - name: Validate distributions
+        run: |
+          pdm run python -m twine check dist/*.tar.gz dist/*.whl
+          pdm run python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          for path in sorted(Path("dist").glob("*")):
+              if path.suffix == ".whl":
+                  with zipfile.ZipFile(path) as archive:
+                      members = archive.namelist()
+              elif path.suffixes[-2:] == [".tar", ".gz"]:
+                  with tarfile.open(path) as archive:
+                      members = archive.getnames()
+              else:
+                  continue
+
+              forbidden = [
+                  name for name in members if "__pycache__" in name or name.endswith((".pyc", ".pyo"))
+              ]
+              if forbidden:
+                  raise SystemExit(f"{path.name} contains forbidden files: {forbidden[:10]}")
+
+              print(f"{path.name}: OK")
+          PY
+
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

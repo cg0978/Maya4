@@ -533,11 +533,11 @@
                     </svg>
                     GitHub
                 </a>
-                <a href="https://huggingface.co/Maya4" target="_blank">
+                <a href="https://huggingface.co/buckets/ESA-philab/Maya4" target="_blank">
                     <svg viewBox="0 0 95 88" fill="currentColor">
                         <path d="M47.21,0C31.48,0,18.76,12.72,18.76,28.44c0,7.72,3.07,14.73,8.05,19.87L47.21,88l20.4-39.69c4.98-5.14,8.05-12.15,8.05-19.87C75.66,12.72,62.94,0,47.21,0z M47.21,39.79c-6.25,0-11.35-5.09-11.35-11.35s5.09-11.35,11.35-11.35s11.35,5.09,11.35,11.35S53.46,39.79,47.21,39.79z"/>
                     </svg>
-                    Dataset (HF)
+                    Bucket (HF)
                 </a>
                 <a href="#" class="disabled" title="ArXiv paper coming soon">
                     <svg viewBox="0 0 24 24" fill="currentColor">
@@ -578,7 +578,7 @@
                     </div>
                     <div class="parameter-card">
                         <h4>☁️ Cloud-Native</h4>
-                        <p>Native HuggingFace Hub integration with 68TB+ of curated data</p>
+                        <p>Native Hugging Face bucket integration with lazy metadata and chunk downloads</p>
                     </div>
                     <div class="parameter-card">
                         <h4>📊 ML-Ready</h4>
@@ -587,7 +587,7 @@
                 </div>
                 
                 <h3>Quick Start</h3>
-                <div class="code-block"><span class="keyword">from</span> maya4 <span class="keyword">import</span> get_sar_dataloader<br><br><span class="comment"># Create a basic dataloader</span><br>loader = <span class="function">get_sar_dataloader</span>(<br>    data_dir=<span class="string">'./data'</span>,<br>    level_from=<span class="string">'rcmc'</span>,<br>    level_to=<span class="string">'az'</span>,<br>    batch_size=<span class="number">16</span>,<br>    patch_size=(<span class="number">1000</span>, <span class="number">1000</span>),<br>    online=<span class="keyword">True</span><br>)<br><br><span class="comment"># Iterate through batches</span><br><span class="keyword">for</span> x_batch, y_batch <span class="keyword">in</span> loader:<br>    <span class="comment"># x_batch: input (rcmc)</span><br>    <span class="comment"># y_batch: target (az)</span><br>    <span class="keyword">pass</span></div>
+                <div class="code-block"><span class="keyword">from</span> maya4 <span class="keyword">import</span> DEFAULT_BUCKET_ID, SampleFilter, get_sar_dataloader<br><br><span class="comment"># Create a bucket-backed dataloader</span><br>filters = <span class="function">SampleFilter</span>(<br>    years=[<span class="number">2025</span>],<br>    polarizations=[<span class="string">"vv"</span>],<br>    stripmap_modes=[<span class="number">1</span>, <span class="number">4</span>]<br>)<br><br>loader = <span class="function">get_sar_dataloader</span>(<br>    data_dir=<span class="string">'./data'</span>,<br>    bucket_id=DEFAULT_BUCKET_ID,<br>    filters=filters,<br>    level_from=<span class="string">'rcmc'</span>,<br>    level_to=<span class="string">'az'</span>,<br>    batch_size=<span class="number">1</span>,<br>    patch_size=(<span class="number">256</span>, <span class="number">256</span>),<br>    stride=(<span class="number">256</span>, <span class="number">256</span>),<br>    buffer=(<span class="number">0</span>, <span class="number">0</span>),<br>    online=<span class="keyword">True</span>,<br>    use_balanced_sampling=<span class="keyword">False</span><br>)<br><br>x_batch, y_batch = <span class="function">next</span>(<span class="function">iter</span>(loader))<br><span class="keyword">print</span>(x_batch.shape, y_batch.shape)</div>
             </div>
             
             <!-- Installation Section -->
@@ -671,7 +671,7 @@ pdm install -G :all
                     <tbody>
                         <tr>
                             <td><strong>Python</strong></td>
-                            <td>3.8+</td>
+                            <td>3.12+</td>
                             <td>Core interpreter</td>
                         </tr>
                         <tr>
@@ -687,7 +687,7 @@ pdm install -G :all
                         <tr>
                             <td><strong>huggingface_hub</strong></td>
                             <td>Latest</td>
-                            <td>Dataset downloading</td>
+                            <td>Bucket access and downloads</td>
                         </tr>
                         <tr>
                             <td><strong>CUDA</strong></td>
@@ -713,6 +713,7 @@ pdm install -G :all
 <span class="comment"># Test dataloader creation</span><br>
 loader = <span class="function">get_sar_dataloader</span>(<br>
     data_dir=<span class="string">'./data'</span>,<br>
+    bucket_id=<span class="string">'ESA-philab/Maya4'</span>,<br>
     level_from=<span class="string">'rcmc'</span>,<br>
     level_to=<span class="string">'az'</span>,<br>
     max_products=<span class="number">1</span>,<br>
@@ -725,8 +726,8 @@ loader = <span class="function">get_sar_dataloader</span>(<br>
                 <h3>Troubleshooting</h3>
                 <div class="parameter-grid">
                     <div class="parameter-card">
-                        <h4>🔒 HuggingFace Authentication</h4>
-                        <p>For private datasets, authenticate with HuggingFace:</p>
+                        <h4>🔒 Hugging Face Authentication</h4>
+                        <p>The current public bucket does not require authentication. For future private buckets, authenticate with Hugging Face:</p>
                         <div class="code-block" style="margin-top: 10px; font-size: 12px;">
 huggingface-cli login
                         </div>
@@ -734,7 +735,7 @@ huggingface-cli login
                     
                     <div class="parameter-card">
                         <h4>💾 Disk Space</h4>
-                        <p>Each SAR product is ~20GB. Ensure adequate storage for your use case. Online mode downloads chunks on-demand.</p>
+                        <p>Maya4 products are large Zarr archives. Ensure adequate storage for your use case; online mode only downloads the metadata and chunks you touch.</p>
                     </div>
                     
                     <div class="parameter-card">
@@ -761,12 +762,17 @@ pip install --upgrade maya4
                     <div class="parameter-card">
                         <h4>data_dir</h4>
                         <span class="type">str</span>
-                        <p>Local directory for storing/loading SAR products.<br>Products are organized as: data_dir/[part]/[product_name].zarr/.<br>This is where Maya4 will look for local Zarr files or download new products when online mode is enabled.</p>
+                        <p>Local directory for storing/loading SAR products.<br>Bucket-backed online mode mirrors products as: data_dir/[product_name].zarr/.<br>Legacy nested local mirrors like data_dir/PT1/[product_name].zarr are still supported offline.</p>
+                    </div>
+                    <div class="parameter-card">
+                        <h4>bucket_id</h4>
+                        <span class="type">str</span>
+                        <p>Hugging Face bucket identifier used for online loading.<br>Default: <strong>ESA-philab/Maya4</strong>.<br>Set this explicitly if you want to target a different Maya4-compatible bucket.</p>
                     </div>
                     <div class="parameter-card">
                         <h4>online</h4>
                         <span class="type">bool</span>
-                        <p>Enable automatic downloading from HuggingFace Hub.<br><strong>True</strong>: downloads missing products from Maya4 HF organization (requires HF authentication for private datasets)<br><strong>False</strong>: only uses locally available products.<br>In online mode, only required chunks are downloaded on-demand (lazy loading), metadata downloaded first.</p>
+                        <p>Enable automatic downloading from the Hugging Face bucket.<br><strong>True</strong>: downloads missing products from <strong>ESA-philab/Maya4</strong><br><strong>False</strong>: only uses locally available products.<br>In online mode, only required chunks are downloaded on-demand (lazy loading), with metadata fetched first.</p>
                     </div>
                     <div class="parameter-card">
                         <h4>max_products</h4>
@@ -776,7 +782,7 @@ pip install --upgrade maya4
                     <div class="parameter-card">
                         <h4>filters</h4>
                         <span class="type">SampleFilter</span>
-                        <p>Metadata-based filtering by year, polarization, stripmap mode, and geographic location.<br><strong>years</strong>: [2023, 2024] for acquisition years<br><strong>polarizations</strong>: ["hh", "hv", "vh", "vv"] where H=horizontal, V=vertical<br><strong>stripmap_modes</strong>: [1,2,3] for narrow swaths/higher resolution, [4,5,6] for wider swaths<br><strong>parts</strong>: ["PT1", "PT2", etc.] for geographic regions.</p>
+                        <p>Metadata-based filtering by year, polarization, stripmap mode, and geographic location.<br><strong>years</strong>: [2025] for acquisition years<br><strong>polarizations</strong>: ["hh", "hv", "vh", "vv"] where H=horizontal, V=vertical<br><strong>stripmap_modes</strong>: [1,2,3] for narrow swaths/higher resolution, [4,5,6] for wider swaths.<br>Legacy <strong>parts</strong> filtering only applies to older nested local mirrors, not the flat bucket layout.</p>
                     </div>
                 </div>
                 
@@ -1095,22 +1101,21 @@ loader = <span class="function">get_sar_dataloader</span>(
                     </div>
                     <div class="parameter-card">
                         <h4>🗺️ Geographic Parts Filter</h4>
-                        <p><strong>Parameter:</strong> <code>parts=["PT1", "PT2"]</code></p>
-                        <p>Maya4 organizes products into geographic partitions (PT1, PT2, PT3, PT4).<br><br>
-                        Filter by region to focus on specific areas of interest or ensure geographic diversity.</p>
+                        <p><strong>Parameter:</strong> <code>parts=["PT1"]</code></p>
+                        <p><strong>Legacy local-only filter.</strong><br><br>
+                        Use this only when you already have older nested mirrors such as <code>data/PT1/&lt;product&gt;.zarr</code> on disk. The public bucket is flat, so bucket-backed examples should filter by year, polarization, stripmap mode, or location instead.</p>
                     </div>
                 </div>
                 
                 <div class="code-block">
 <span class="keyword">from</span> maya4 <span class="keyword">import</span> SampleFilter<br>
 <br>
-<span class="comment"># Create a filter for HH polarization data from 2023-2024</span><br>
-<span class="comment"># in high-resolution modes from the PT1 region</span><br>
+<span class="comment"># Create a filter for VV data from 2025</span><br>
+<span class="comment"># in stripmap modes 1 and 4</span><br>
 filters = <span class="function">SampleFilter</span>(<br>
-    years=[<span class="number">2023</span>, <span class="number">2024</span>],           <span class="comment"># Only recent acquisitions</span><br>
-    polarizations=[<span class="string">"hh"</span>],            <span class="comment"># Co-polarized horizontal</span><br>
-    stripmap_modes=[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>],       <span class="comment"># High-resolution modes only</span><br>
-    parts=[<span class="string">"PT1"</span>]                    <span class="comment"># Specific geographic region</span><br>
+    years=[<span class="number">2025</span>],<br>
+    polarizations=[<span class="string">"vv"</span>],<br>
+    stripmap_modes=[<span class="number">1</span>, <span class="number">4</span>]<br>
 )<br>
 <br>
 loader = <span class="function">get_sar_dataloader</span>(<br>
@@ -1328,7 +1333,7 @@ loader = <span class="function">get_sar_dataloader</span>(<br>
                     
                     <label>Online Mode:</label>
                     <select id="online-mode">
-                        <option value="True" selected>True (auto-download from HuggingFace)</option>
+                        <option value="True" selected>True (auto-download from Hugging Face bucket)</option>
                         <option value="False">False (local files only)</option>
                     </select>
                     
@@ -1343,7 +1348,7 @@ loader = <span class="function">get_sar_dataloader</span>(<br>
             <p>
                 <strong>Maya4</strong> - Multi-Level SAR Processing & PyTorch DataLoader<br>
                 <a href="https://github.com/sirbastiano/Maya4" target="_blank">GitHub</a> | 
-                <a href="https://huggingface.co/Maya4" target="_blank">HuggingFace</a><br>
+                <a href="https://huggingface.co/buckets/ESA-philab/Maya4" target="_blank">Hugging Face Bucket</a><br>
                 License: Apache-2.0
             </p>
         </footer>

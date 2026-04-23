@@ -1,0 +1,14 @@
+{
+  "pytest": {
+    "returncode": 0
+  },
+  "network_smoke": {
+    "returncode": 0
+  },
+  "reference_sweep": {
+    "returncode": 0
+  },
+  "diff_stat": {
+    "returncode": 0
+  }
+}

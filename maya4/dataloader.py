@@ -1,5 +1,6 @@
 import math
 import re
+import warnings
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Sampler
@@ -10,21 +11,35 @@ import zarr
 from typing import List, Tuple, Dict, Optional, Union, Callable
 import json
 import pandas as pd
-import dask.array as da
 import time 
 import os
 import functools
 import math
+try:
+    import dask.array as da
+    HAS_DASK = True
+except ImportError:
+    da = None
+    HAS_DASK = False
 try:
     from sklearn.cluster import KMeans
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
 
-from maya4.utils import get_chunk_name_from_coords, get_part_from_filename, get_sample_visualization, get_zarr_version, parse_product_filename, get_balanced_sample_files, SampleFilter
-from maya4.api import list_base_files_in_repo, list_repos_by_author
+from maya4.utils import (
+    build_local_product_path,
+    get_chunk_name_from_coords,
+    get_part_from_filename,
+    get_sample_visualization,
+    get_zarr_version,
+    parse_product_filename,
+    get_balanced_sample_files,
+    SampleFilter,
+)
+from maya4.api import DEFAULT_BUCKET_ID, list_base_files_in_bucket
 from maya4.utils import minmax_normalize, minmax_inverse, extract_stripmap_mode_from_filename, RC_MAX, RC_MIN, GT_MAX, GT_MIN
-from maya4.api import fetch_chunk_from_hf_zarr, download_metadata_from_product
+from maya4.api import fetch_chunk_from_bucket_zarr, download_metadata_from_product
 import matplotlib.pyplot as plt
 from maya4.normalization import BaseTransformModule, NormalizationModule, SARTransform
 from matplotlib.figure import Figure
@@ -211,13 +226,13 @@ class SARZarrDataset(Dataset):
         - Handles both input and target SAR processing levels (e.g., "rcmc" and "az").
         - Supports saving/loading patch indices to avoid recomputation.
         - Implements chunk-level LRU caching for efficient repeated access.
-        - Flexible filtering by part, year, month, polarization, and stripmap mode via SampleFilter.
+        - Flexible filtering by year, month, polarization, stripmap mode, and legacy local parts via SampleFilter.
         - Supports positional encoding and concatenation of patches.
 
     Args:
         data_dir (str): Directory containing Zarr files.
-        filters (SampleFilter, optional): Filter for selecting data by part, year, etc.
-        author (str, optional): Author or dataset identifier. Defaults to 'Maya4'.
+        filters (SampleFilter, optional): Filter for selecting data by year, polarization, stripmap mode, etc.
+        bucket_id (str, optional): Hugging Face bucket identifier. Defaults to "ESA-philab/Maya4".
         online (bool, optional): If True, enables remote Hugging Face access. Defaults to False.
         return_whole_image (bool, optional): If True, returns the whole image as a single patch. Defaults to False.
         transform (callable, optional): Optional transform to apply to both input and target patches.
@@ -265,7 +280,8 @@ class SARZarrDataset(Dataset):
         self,
         data_dir: str,
         filters: Optional[SampleFilter] = None,
-        author: str = 'Maya4',
+        bucket_id: str = DEFAULT_BUCKET_ID,
+        author: Optional[str] = None,
         online: bool = False,
         return_whole_image: bool = False,
         transform: Optional[SARTransform] = None,
@@ -296,7 +312,13 @@ class SARZarrDataset(Dataset):
     ):
         self.data_dir = Path(data_dir)
         self.filters = filters if filters is not None else SampleFilter()
-        self.author = author
+        self.bucket_id = bucket_id
+        if author is not None:
+            warnings.warn(
+                "SARZarrDataset(author=...) is deprecated. Use bucket_id instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.return_whole_image = return_whole_image
         self.transform = transform
         self._patch_size = patch_size
@@ -447,26 +469,20 @@ class SARZarrDataset(Dataset):
             self._files.at[idx[0], 'samples'] = samples
     def _build_file_list(self):
         """
-        Retrieve the list of Zarr files to use, either from the local directory or from a remote Hugging Face repository.
-        Filters files using the provided glob pattern and limits to max_products.
+        Retrieve the list of Zarr files to use, either locally or from the Maya4 bucket.
         """
         if self.online:
-            repos = list_repos_by_author(self.author)
+            remote_files = [
+                name
+                for name in list_base_files_in_bucket(bucket_id=self.bucket_id, relative_path=True)
+                if name.endswith(".zarr")
+            ]
             if self.verbose:
-                print(f"Found {len(repos)} repositories by author '{self.author}': {repos}")
-            self.remote_files = {}
-            for repo in repos:
-                repo_files = list_base_files_in_repo(
-                    repo_id=repo,
-                )
-                # Convert glob pattern to regex for matching
-                if self.verbose:
-                    print(f"Found {len(repo_files)} files in the remote repository: '{repo}'")
-                repo_name = repo.split('/')[-1]
-                self.remote_files[repo_name] = repo_files
-                records = [r for r in (parse_product_filename(os.path.join(self.data_dir, part, f)) for part, files in self.remote_files.items() for f in files) if r is not None]
-
-            print(f"Total files found in remote repository: {len(records)}")
+                print(f"Found {len(remote_files)} products in bucket '{self.bucket_id}'")
+            self.remote_files = remote_files
+            records = [r for r in (parse_product_filename(self.data_dir / name) for name in remote_files) if r is not None]
+            if self.verbose:
+                print(f"Total files found in remote bucket: {len(records)}")
             df = pd.DataFrame(records)
         else:
             found_files = sorted(self.data_dir.rglob("*.zarr"))
@@ -498,10 +514,7 @@ class SARZarrDataset(Dataset):
                  elif self.online:
                      # Download metadata to check version
                      zfile_name = zfile.name
-                     part = str(row['part'])
-                     repo_id = f"{self.author}/{part}"
-                     local_part_dir = self.data_dir / part
-                     local_part_dir.mkdir(parents=True, exist_ok=True)
+                     self.data_dir.mkdir(parents=True, exist_ok=True)
                      
                      if self.verbose:
                          print(f"Downloading metadata to check version for {zfile_name}...")
@@ -513,9 +526,9 @@ class SARZarrDataset(Dataset):
                          # Based on usage elsewhere, it fetches root metadata + specified levels.
                          download_metadata_from_product(
                              zfile_name=str(zfile_name),
-                             local_dir=str(local_part_dir),
+                             local_dir=str(self.data_dir),
                              levels=[], 
-                             repo_id=repo_id,
+                             bucket_id=self.bucket_id,
                              show_progress=False
                          )
                          
@@ -546,7 +559,7 @@ class SARZarrDataset(Dataset):
                     config_path=str(self.data_dir),
                     verbose=True,  # self.verbose
                     split_type=self.split, 
-                    repos=self.filters.parts if self.filters.parts else ['PT1', 'PT2', 'PT3', 'PT4']
+                    bucket_id=self.bucket_id,
                 )
                 if balanced_files:
                     # Filter the files to only include balanced selection
@@ -563,19 +576,8 @@ class SARZarrDataset(Dataset):
         
         # Pre-create directory structure for online mode
         if self.online:
-            parts_to_create = set()
-            for _, row in self._files.iterrows():
-                part = get_part_from_filename(row['full_name'])
-                if part:
-                    parts_to_create.add(part)
-            
-            for part in parts_to_create:
-                part_dir = os.path.join(self.data_dir, part)
-                if not os.path.exists(part_dir):
-                    os.makedirs(part_dir, exist_ok=True)
-                    if self.verbose:
-                        print(f"Created directory: {part_dir}")
-        
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+
         if self.verbose:
             print(f"Selected files: {len(self._files)} total")
             print(f"Files: {self._files['full_name'].tolist()}")
@@ -653,8 +655,8 @@ class SARZarrDataset(Dataset):
         if store is None:
             error_msg = f"Failed to open store for {zfile}. "
             if self.online:
-                error_msg += "File may not exist in remote repository or download failed. "
-                error_msg += "Check HuggingFace credentials and network connection."
+                error_msg += "File may not exist in the remote bucket or download failed. "
+                error_msg += "Check Hugging Face credentials and network connection."
             else:
                 error_msg += "File does not exist locally and online mode is disabled."
             raise RuntimeError(error_msg)
@@ -682,31 +684,29 @@ class SARZarrDataset(Dataset):
             # Just ensure metadata is downloaded, but don't open the store yet
             if not Path(zfile).exists():
                 zfile_name = os.path.basename(zfile)
-                part = get_part_from_filename(zfile)
-                repo_id = self.author + '/' + part
                 
                 if self.verbose:
-                    print(f"Downloading metadata for {zfile_name} from {repo_id}...")
+                    print(f"Downloading metadata for {zfile_name} from bucket {self.bucket_id}...")
                 
                 try:
                     download_metadata_from_product(
                         zfile_name=str(zfile_name),
-                        local_dir=os.path.join(self.data_dir, part),
+                        local_dir=str(self.data_dir),
                         levels=[self.level_from, self.level_to],
-                        repo_id=repo_id,
+                        bucket_id=self.bucket_id,
                         show_progress=self.verbose
                     )
                 except Exception as e:
                     raise RuntimeError(
-                        f"Failed to download metadata for {zfile_name} from {repo_id}. "
-                        f"Error: {e}. Check HuggingFace credentials and network connection."
+                        f"Failed to download metadata for {zfile_name} from bucket {self.bucket_id}. "
+                        f"Error: {e}. Check Hugging Face credentials and network connection."
                     )
                 
                 # Verify file exists after download
                 if not Path(zfile).exists():
                     raise RuntimeError(
                         f"File {zfile} still does not exist after metadata download. "
-                        f"The product may be incomplete or unavailable in repository {repo_id}."
+                        f"The product may be incomplete or unavailable in bucket {self.bucket_id}."
                     )
             # In online mode, leave store as None - it will be opened lazily on first access
             return
@@ -714,11 +714,6 @@ class SARZarrDataset(Dataset):
         # Offline mode: only open stores if file exists locally
         if not Path(zfile).exists():
             return  # File doesn't exist and we're offline
-        
-        # Ensure part directory exists
-        part = get_part_from_filename(zfile)
-        if part and not os.path.exists(os.path.join(self.data_dir, part)):
-            os.makedirs(os.path.join(self.data_dir, part), exist_ok=True)
         
         # Open the store (offline mode only)
         if self.backend == "zarr":
@@ -810,6 +805,8 @@ class SARZarrDataset(Dataset):
             RuntimeError: If Zarr store is incomplete (metadata only, no chunks).
         """
         if self.backend == "dask":
+            if not HAS_DASK:
+                raise ImportError("Backend 'dask' requires the optional dependency 'dask[array]'.")
             return da.from_zarr(zfile)
         elif self.backend == "zarr":
             try:
@@ -853,8 +850,6 @@ class SARZarrDataset(Dataset):
         if not Path(zfile).exists() or not level_dir.exists():
             if self.online:
                 zfile_name = os.path.basename(zfile)
-                part = get_part_from_filename(zfile)
-                repo_id = self.author + '/' + part
                 
                 if self.verbose:
                     print(f"Downloading metadata for level '{level}' from {zfile_name}...")
@@ -862,22 +857,22 @@ class SARZarrDataset(Dataset):
                 try:
                     download_metadata_from_product(
                         zfile_name=str(zfile_name),
-                        local_dir=os.path.join(self.data_dir, part),
+                        local_dir=str(self.data_dir),
                         levels=[level, self.level_from, self.level_to],
-                        repo_id=repo_id,
+                        bucket_id=self.bucket_id,
                         show_progress=self.verbose
                     )
                 except Exception as e:
                     raise RuntimeError(
                         f"Failed to download metadata for level '{level}' in {zfile_name}. "
-                        f"Error: {e}. Check HuggingFace credentials and network connection."
+                        f"Error: {e}. Check Hugging Face credentials and network connection."
                     )
                 
                 # Verify level directory exists after download
                 if not level_dir.exists():
                     raise RuntimeError(
                         f"Level '{level}' still does not exist in {zfile} after metadata download. "
-                        f"The product may be incomplete or the level may not exist in repository {repo_id}."
+                        f"The product may be incomplete or the level may not exist in bucket {self.bucket_id}."
                     )
             else:
                 raise ValueError(f"Level '{level}' not found in Zarr store {zfile} and online mode is disabled.")
@@ -947,31 +942,29 @@ class SARZarrDataset(Dataset):
         if not Path(zfile).exists():
             if self.online:
                 zfile_name = os.path.basename(zfile)
-                part = get_part_from_filename(zfile)
-                repo_id = self.author + '/' + part
                 
                 if self.verbose:
-                    print(f"Downloading metadata for {zfile_name} from {repo_id}...")
+                    print(f"Downloading metadata for {zfile_name} from bucket {self.bucket_id}...")
                 
                 try:
                     download_metadata_from_product(
                         zfile_name=str(zfile_name),
-                        local_dir=os.path.join(self.data_dir, part),
+                        local_dir=str(self.data_dir),
                         levels=[self.level_from, self.level_to],
-                        repo_id=repo_id,
+                        bucket_id=self.bucket_id,
                         show_progress=self.verbose
                     )
                 except Exception as e:
                     raise RuntimeError(
-                        f"Failed to download metadata for {zfile_name} from {repo_id}. "
-                        f"Error: {e}. Check HuggingFace credentials and network connection."
+                        f"Failed to download metadata for {zfile_name} from bucket {self.bucket_id}. "
+                        f"Error: {e}. Check Hugging Face credentials and network connection."
                     )
                 
                 # Verify file exists after download
                 if not Path(zfile).exists():
                     raise RuntimeError(
                         f"File {zfile} still does not exist after metadata download. "
-                        f"The product may be incomplete or unavailable in repository {repo_id}."
+                        f"The product may be incomplete or unavailable in bucket {self.bucket_id}."
                     )
             else:
                 raise ValueError(f"File {zfile} not found and online mode is disabled.")
@@ -1037,8 +1030,6 @@ class SARZarrDataset(Dataset):
         if not Path(zfile).exists() or not level_from_dir.exists() or not level_to_dir.exists():
             if self.online:
                 zfile_name = os.path.basename(zfile)
-                part = get_part_from_filename(zfile)
-                repo_id = self.author + '/' + part
                 
                 if self.verbose:
                     print(f"Downloading metadata for {zfile_name} (levels: {self.level_from}, {self.level_to})...")
@@ -1046,15 +1037,15 @@ class SARZarrDataset(Dataset):
                 try:
                     download_metadata_from_product(
                         zfile_name=str(zfile_name),
-                        local_dir=os.path.join(self.data_dir, part),
+                        local_dir=str(self.data_dir),
                         levels=[self.level_from, self.level_to],
-                        repo_id=repo_id,
+                        bucket_id=self.bucket_id,
                         show_progress=self.verbose
                     )
                 except Exception as e:
                     raise RuntimeError(
-                        f"Failed to download metadata for {zfile_name} from {repo_id}. "
-                        f"Error: {e}. Check HuggingFace credentials and network connection."
+                        f"Failed to download metadata for {zfile_name} from bucket {self.bucket_id}. "
+                        f"Error: {e}. Check Hugging Face credentials and network connection."
                     )
                 
                 # Verify both levels exist after download
@@ -1069,13 +1060,13 @@ class SARZarrDataset(Dataset):
                 if missing_levels:
                     raise RuntimeError(
                         f"Missing levels {missing_levels} in {zfile} after metadata download. "
-                        f"The product may be incomplete or unavailable in repository {repo_id}. "
-                        f"Try downloading the full product manually or check repository contents."
+                        f"The product may be incomplete or unavailable in bucket {self.bucket_id}. "
+                        f"Try downloading the full product manually or check bucket contents."
                     )
             else:
                 raise ValueError(
                     f"Levels {self.level_from} and {self.level_to} not found in Zarr store {zfile}. "
-                    f"Enable online mode to download from HuggingFace."
+                    f"Enable online mode to download from the Hugging Face bucket."
                 )
         
         self._append_file_to_stores(Path(zfile))
@@ -1341,19 +1332,16 @@ class SARZarrDataset(Dataset):
             Path: Path to the downloaded chunk file.
         """
         zfile_name = os.path.basename(zfile)
-        part = get_part_from_filename(zfile)
-        repo_id = self.author + '/' + part
         if not zfile.exists():
             if self.online:
                 meta_file = download_metadata_from_product(
                     zfile_name=str(zfile_name),
-                    local_dir=os.path.join(self.data_dir, part),
-                    levels=[self.level_from, self.level_to], 
-                    repo_id=repo_id
+                    local_dir=str(self.data_dir),
+                    levels=[self.level_from, self.level_to],
+                    bucket_id=self.bucket_id,
                 )
                 with open(meta_file) as f:
-                    zarr_meta = json.load(f)
-                version = zarr_meta.get('zarr_format', 2)
+                    json.load(f)
                 self.calculate_patches_from_store(zfile)
             else:
                 raise FileNotFoundError(f"Zarr file {zfile} does not exist.")
@@ -1361,7 +1349,7 @@ class SARZarrDataset(Dataset):
         # Get chunk shape from metadata without opening the array (avoids circular dependency)
         chunks = self._get_chunks_from_metadata(zfile, level)
         chunk_name = get_chunk_name_from_coords(y, x, zarr_file_name=zfile_name, level=level, chunks=chunks, version=get_zarr_version(zfile))
-        chunk_path = self.data_dir / part / chunk_name
+        chunk_path = self.data_dir / chunk_name
         
         needs_download = (not chunk_path.exists())
         if not needs_download:
@@ -1372,14 +1360,14 @@ class SARZarrDataset(Dataset):
 
         if needs_download:
             if self.verbose:
-                print(f"Chunk {chunk_name} missing/empty. Downloading from Hugging Face Zarr archive...")
-            fetch_chunk_from_hf_zarr(
+                print(f"Chunk {chunk_name} missing/empty. Downloading from Maya4 bucket archive...")
+            fetch_chunk_from_bucket_zarr(
                 level=level,
                 y=y,
                 x=x,
                 zarr_archive=zfile_name,
-                local_dir=os.path.join(self.data_dir, part),
-                repo_id=repo_id,
+                local_dir=str(self.data_dir),
+                bucket_id=self.bucket_id,
             )
 
         # Fail fast if the chunk is still not readable on disk.
@@ -2233,6 +2221,7 @@ class SARDataloader(DataLoader):
 def get_sar_dataloader(
     data_dir: str,
     filters: Optional[SampleFilter] = None,
+    bucket_id: str = DEFAULT_BUCKET_ID,
     batch_size: int = 8,
     num_workers: int = 2,
     return_whole_image: bool = False,
@@ -2270,6 +2259,7 @@ def get_sar_dataloader(
 
     Args:
         data_dir (str): Path to the directory containing SAR data.
+        bucket_id (str, optional): Hugging Face bucket identifier for online mode. Defaults to "ESA-philab/Maya4".
         batch_size (int, optional): Number of samples per batch. Defaults to 8.
         num_workers (int, optional): Number of subprocesses for data loading. Defaults to 2.
         return_whole_image (bool, optional): If True, returns the whole image. Defaults to False.
@@ -2311,6 +2301,7 @@ def get_sar_dataloader(
     dataset = SARZarrDataset(
         data_dir=data_dir,
         filters=filters,
+        bucket_id=bucket_id,
         return_whole_image=return_whole_image,
         transform=transform,
         patch_size=patch_size,

@@ -1,0 +1,12 @@
+timestamp=20260423T133631+02:00
+python=3.12.9 | packaged by conda-forge | (main, Mar  4 2025, 22:44:42) [Clang 18.1.8 ]
+executable=/opt/miniconda3/bin/python
+platform=macOS-26.2-arm64-arm-64bit
+pdm=present
+pytest=8.4.2
+twine=6.2.0
+black=MISSING: No module named 'black'
+isort=MISSING: No module named 'isort'
+flake8=MISSING: No module named 'flake8'
+huggingface_hub=1.10.1
+zarr=3.1.6

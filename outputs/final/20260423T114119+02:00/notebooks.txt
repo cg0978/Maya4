@@ -1,0 +1,4 @@
+notebooks/0. basic_usage.ipynb
+notebooks/1. advanced_usage.ipynb
+notebooks/2. visualisation.ipynb
+notebooks/world_map.ipynb
