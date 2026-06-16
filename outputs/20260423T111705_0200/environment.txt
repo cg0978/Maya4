@@ -1,4 +1,0 @@
-timestamp=20260423T111705+0200
-cwd=/Users/roberto.delprete/Downloads/Maya4
-python=Python 3.12.9
-git_status=1 files-modified
